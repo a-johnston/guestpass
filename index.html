@@ -13,10 +13,9 @@
   <section id="setup" hidden>
     <form id="setup-form">
       <h1>Guestpass</h1>
-      <p class="hint">Make a link to any OpenAI-compatible server. Opening the link connects straight to the chat. <a href="https://github.com/a-johnston/guestpass" target="_blank" rel="noopener noreferrer">Source on GitHub</a>.</p>
+      <p class="hint">Make a link to any OpenAI-compatible server. Opening the link connects straight to the chat.</p>
       <label>Server base URL
         <input id="cfg-baseurl" type="url" placeholder="https://llm.example.com:8443/v1" required />
-        <small>The OpenAI-compatible API root (the part before <code>/chat/completions</code>).</small>
       </label>
       <label>API key
         <input id="cfg-apikey" type="password" placeholder="optional" autocomplete="off" />
@@ -27,7 +26,6 @@
       <p id="cfg-status" class="hint" role="status"></p>
       <fieldset class="share">
         <legend>Link</legend>
-        <p class="hint">Contains the URL, key and system prompt. Anyone with it can use the server. Chats use the first model the server lists.</p>
         <div class="row">
           <input id="share-link" readonly aria-label="Link" />
           <button type="button" id="copy-share">Copy</button>
@@ -55,11 +53,9 @@
           </button>
           <div id="opts" class="popover" role="dialog" aria-label="Options" hidden>
             <fieldset>
-              <legend>Thinking sent back to the model</legend>
-              <label><input type="radio" name="think-mode" value="turn" checked /> Current turn only
-                <small>Keeps the model's plan across a tool loop. The usual choice; keeps context small.</small></label>
-              <label><input type="radio" name="think-mode" value="all" /> All turns
-                <small>For models whose chat template keeps earlier thinking. Uses more context.</small></label>
+              <legend>Thinking returned to the model</legend>
+              <label><input type="radio" name="think-mode" value="all" checked /> All turns</label>
+              <label><input type="radio" name="think-mode" value="turn" /> Current turn only</label>
             </fieldset>
           </div>
         </div>
@@ -71,7 +67,6 @@
 
       <main id="messages" aria-live="polite">
         <div id="empty" class="empty">
-          <h1>Guestpass</h1>
           <p>Say hello, or try one of these:</p>
           <div id="starters" class="starters"></div>
         </div>

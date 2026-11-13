@@ -27,7 +27,7 @@ const state = {
   // then it is dropped for the rest of the session (see FALLBACKS).
   toolsSupported: true,
   sendReasoning: true, // reasoning_content on assistant messages (see thinkingMode)
-  thinkingMode: 'turn', // 'turn': current turn only; 'all': every turn (options popover)
+  thinkingMode: 'all', // 'turn': current turn only; 'all': every turn (options popover)
   requestUsage: true, // stream_options.include_usage, for the context counter
   context: { used: null, max: null },
   conn: 'pending', // model list: 'pending' (messages queue) | 'ok' | 'failed'
@@ -281,9 +281,9 @@ function flash(btn, text) {
 
 // ---------------------------------------------------------------- composer + queue
 
-const IDLE_PLACEHOLDER = 'Message…  (Enter to send, Shift+Enter for newline)';
-const BUSY_PLACEHOLDER = 'Queue a message… it is sent at the next step (Esc stops)';
-const CONNECTING_PLACEHOLDER = 'Connecting… messages are queued until the server answers';
+const IDLE_PLACEHOLDER = 'Message';
+const BUSY_PLACEHOLDER = 'Queue Message';
+const CONNECTING_PLACEHOLDER = 'Queue Message';
 
 function updatePlaceholder() {
   el.prompt.placeholder = state.busy ? BUSY_PLACEHOLDER : state.conn === 'pending' ? CONNECTING_PLACEHOLDER : IDLE_PLACEHOLDER;
