@@ -59,8 +59,10 @@
 
       <div id="queue" aria-live="polite" hidden></div>
       <form id="composer">
-        <textarea id="prompt" rows="1" autocomplete="off" aria-label="Message"></textarea>
-        <button id="stop-btn" type="button" class="danger" hidden>Stop</button>
+        <div class="prompt-wrap">
+          <textarea id="prompt" rows="1" autocomplete="off" aria-label="Message"></textarea>
+          <button id="stop-btn" type="button" class="stop-btn" title="Stop generating (Esc)" aria-label="Stop generating" hidden></button>
+        </div>
         <button id="send-btn" type="submit" class="primary">Send</button>
       </form>
     </section>

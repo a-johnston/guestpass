@@ -77,6 +77,7 @@ function init() {
   state.cfg = { ...state.cfg, ...shared, baseUrl: normalizeBaseUrl(shared.baseUrl) };
   wireComposer();
   wireLayout();
+  wireScrollFollow();
   connect();
   el.prompt.focus();
 }
@@ -202,6 +203,7 @@ function wireComposer() {
     if (!text) return;
     el.prompt.value = '';
     autosize();
+    following = true; // sending is a clear "take me to the latest"
     if (state.busy) {
       enqueue(text);
     } else {
@@ -396,7 +398,7 @@ function mountInlineWidget(view, chip, widget) {
   const card = widgetCard(widget);
   view.extras.append(card);
   state.inline.set(widget.id, { card, chip });
-  scrollIfNear();
+  followScroll();
 }
 
 /** Removes a live inline widget; its tool-call line stays, marked with `reason`. */
@@ -411,17 +413,32 @@ function removeInlineWidget(id, reason) {
 
 // ---------------------------------------------------------------- message views
 
-function append(node) {
-  el.empty.hidden = true;
-  const stick = el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight < 80;
-  el.messages.append(node);
-  if (stick) el.messages.scrollTop = el.messages.scrollHeight;
-  return node;
+// Auto-follow is a sticky mode rather than "near the bottom": any upward scroll by the user
+// (wheel, keys, touch, scrollbar drag) turns it off, and reaching the bottom turns it back on.
+// A proximity rule kept yanking the view back whenever you'd scrolled up only a little.
+let following = true;
+
+function wireScrollFollow() {
+  const m = el.messages;
+  let lastTop = m.scrollTop;
+  const atBottom = () => m.scrollHeight - m.scrollTop - m.clientHeight <= 8;
+  m.addEventListener('wheel', (e) => { if (e.deltaY < 0) following = false; }, { passive: true });
+  m.addEventListener('scroll', () => {
+    if (atBottom()) following = true;
+    else if (m.scrollTop < lastTop - 1) following = false; // moved up; content shrinking keeps us at the bottom instead
+    lastTop = m.scrollTop;
+  }, { passive: true });
 }
 
-function scrollIfNear() {
-  const m = el.messages;
-  if (m.scrollHeight - m.scrollTop - m.clientHeight < 160) m.scrollTop = m.scrollHeight;
+function followScroll() {
+  if (following) el.messages.scrollTop = el.messages.scrollHeight;
+}
+
+function append(node) {
+  el.empty.hidden = true;
+  el.messages.append(node);
+  followScroll();
+  return node;
 }
 
 function h(tag, className, text) {
@@ -440,7 +457,10 @@ function notice(text, kind = 'info') {
 }
 
 function formatDuration(ms) {
-  const s = Math.max(1, Math.round(ms / 1000));
+  return formatSeconds(Math.max(1, Math.round(ms / 1000)));
+}
+
+function formatSeconds(s) {
   if (s < 60) return `${s} second${s === 1 ? '' : 's'}`;
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
@@ -461,9 +481,8 @@ function decorateCode(pre, code, host) {
 
 function createAssistantView() {
   const root = append(h('div', 'msg assistant pending'));
-  const thinking = h('details', 'reasoning');
+  const thinking = h('details', 'reasoning'); // starts collapsed; only the user opens it
   thinking.hidden = true;
-  thinking.open = true;
   const thinkingSummary = h('summary', null, 'Thinking…');
   const thinkingText = h('div', 'reasoning-text');
   thinking.append(thinkingSummary, thinkingText);
@@ -476,14 +495,27 @@ function createAssistantView() {
   let finished = false;
   let thinkStart = 0;
   let thinkEnd = 0;
+  let ticker = null; // refreshes the live "Thinking for N seconds…" header
 
+  const endThinking = () => {
+    if (thinkStart && !thinkEnd) thinkEnd = performance.now();
+    clearInterval(ticker);
+    ticker = null;
+  };
   const trackThinking = (p) => {
-    const now = performance.now();
-    if (p.reasoning && !thinkStart) thinkStart = now;
-    if (thinkStart && !thinkEnd && (p.content || p.toolCalls.length)) thinkEnd = now;
+    if (p.reasoning && !thinkStart) {
+      thinkStart = performance.now();
+      ticker = setInterval(updateThinkingSummary, 1000);
+    }
+    if (thinkStart && !thinkEnd && (p.content || p.toolCalls.length)) endThinking();
   };
   const updateThinkingSummary = () => {
-    thinkingSummary.textContent = thinkEnd ? `Thought for ${formatDuration(thinkEnd - thinkStart)}` : 'Thinking…';
+    if (thinkEnd) {
+      thinkingSummary.textContent = `Thought for ${formatDuration(thinkEnd - thinkStart)}`;
+    } else {
+      const s = Math.floor((performance.now() - thinkStart) / 1000);
+      thinkingSummary.textContent = s < 1 ? 'Thinking…' : `Thinking for ${formatSeconds(s)}…`;
+    }
   };
 
   const render = () => {
@@ -492,16 +524,14 @@ function createAssistantView() {
     if (latest.reasoning) {
       thinking.hidden = false;
       thinkingText.textContent = latest.reasoning;
-      if (thinkEnd && thinking.open && !thinking.dataset.userToggled) thinking.open = false;
       updateThinkingSummary();
     }
     renderMarkdown(body, latest.content);
     const pendingCalls = latest.toolCalls.map((c) => c.function.name).filter(Boolean);
     root.dataset.calling = pendingCalls.length ? `Preparing ${pendingCalls.join(', ')}…` : '';
     if (latest.content || latest.reasoning || pendingCalls.length) root.classList.remove('pending');
-    scrollIfNear();
+    followScroll();
   };
-  thinking.querySelector('summary').addEventListener('click', () => { thinking.dataset.userToggled = '1'; });
 
   return {
     extras,
@@ -513,12 +543,11 @@ function createAssistantView() {
     finish(p, { stopped = false } = {}) {
       latest = p;
       trackThinking(p);
-      if (thinkStart && !thinkEnd) thinkEnd = performance.now();
+      endThinking();
       render();
       finished = true; // a still-queued animation-frame render must not overwrite the final one
       root.classList.remove('pending');
       root.dataset.calling = '';
-      if (!thinking.dataset.userToggled) thinking.open = false;
       updateThinkingSummary();
       renderMarkdown(body, p.content, (pre, code) => decorateCode(pre, code, extras));
       if (!p.content && !p.reasoning && !p.toolCalls.length) body.append(h('em', 'muted', '(empty response)'));
@@ -537,7 +566,7 @@ function createAssistantView() {
       const outPre = h('pre', 'tool-output');
       d.append(sum, argPre, outPre);
       extras.append(d);
-      scrollIfNear();
+      followScroll();
       let base = '';
       return {
         done(output) {
@@ -556,6 +585,7 @@ function createAssistantView() {
       };
     },
     fail(err, retry) {
+      endThinking();
       root.classList.remove('pending');
       root.classList.add('error');
       body.textContent = err.message;
@@ -566,7 +596,7 @@ function createAssistantView() {
       row.append(b);
       body.append(row);
     },
-    remove: () => root.remove(),
+    remove: () => { endThinking(); root.remove(); },
   };
 }
 

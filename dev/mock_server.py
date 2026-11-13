@@ -8,6 +8,7 @@
 Scripted behaviour, keyed off the last user message:
   call:{"name": "...", "args": {...}}
                     -> emits exactly that tool call (drive any tool from the chat box)
+  contains "long"   -> streams 80 paragraphs over ~4s (for auto-scroll tests)
   contains "slow"   -> streams reasoning for ~3s before answering (for queue/steering tests)
   contains "pane"   -> calls open_pane with a small canvas app (logs one console.error)
   contains "inline" -> calls render_inline with an SVG
@@ -137,6 +138,10 @@ class Handler(BaseHTTPRequestHandler):
             spec = json.loads(key[5:])
             self.tool_call(spec["name"], spec.get("args", {}))
             return self.end_stream()
+        elif "long" in key.lower():
+            for i in range(80):
+                self.emit(chunk({"content": f"Line {i} of a long answer.\n\n"}))
+                time.sleep(0.05)
         elif "slow" in key.lower():
             for i in range(30):
                 self.emit(chunk({"reasoning_content": f"step {i}... "}))

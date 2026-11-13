@@ -152,8 +152,16 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ---------- composer */
 #composer { display: flex; gap: 8px; padding: 10px 16px 14px; width: 100%; max-width: 892px; margin: 0 auto; align-items: flex-end; }
-#prompt { flex: 1; resize: none; padding: 10px 12px; border-radius: 12px; min-height: 44px; max-height: 240px; overflow-y: hidden; }
-#send-btn, #stop-btn { height: 44px; min-width: 72px; border-radius: 12px; }
+.prompt-wrap { flex: 1; min-width: 0; position: relative; display: flex; }
+/* Right padding always reserves room for the stop button, so text never reflows when it appears. */
+#prompt { flex: 1; resize: none; padding: 10px 46px 10px 12px; border-radius: 12px; min-height: 44px; max-height: 240px; overflow-y: hidden; }
+#send-btn { height: 44px; min-width: 72px; border-radius: 12px; }
+.stop-btn {
+  position: absolute; right: 8px; bottom: 8px; width: 28px; height: 28px; padding: 0;
+  border: none; border-radius: 8px; background: var(--danger); display: grid; place-items: center;
+}
+.stop-btn::before { content: ""; width: 10px; height: 10px; border-radius: 2px; background: #fff; }
+.stop-btn:hover { filter: brightness(1.1); }
 
 #queue { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 892px; margin: 0 auto; padding: 0 16px; }
 .queued {
