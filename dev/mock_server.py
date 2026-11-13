@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Tiny fake OpenAI-compatible server for developing Chat Bridge without a real model.
+
+    python3 dev/mock_server.py [--port 8099] [--key sk-test] [--no-tools]
+
+--no-tools rejects any request carrying `tools`, like llama-server without --jinja.
+
+Scripted behaviour, keyed off the last user message:
+  contains "pane"   -> calls open_pane with a small canvas app (logs one console.error)
+  contains "inline" -> calls render_inline with an SVG
+  contains "think"  -> streams reasoning_content before the answer
+  otherwise         -> echoes back markdown with a runnable ```html block
+After a tool result it replies with a short summary that quotes the tool output.
+Chunks are deliberately split mid-line to exercise the client's SSE parser.
+"""
+import argparse
+import json
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PANE_HTML = """<!doctype html><html><head><title>Bouncer</title>
+<style>html,body{margin:0;height:100%;background:#111}canvas{display:block}</style></head>
+<body><canvas id=c></canvas><script>
+const c=document.getElementById('c'),x=c.getContext('2d');let b={x:50,y:50,vx:3,vy:2};
+function size(){c.width=innerWidth;c.height=innerHeight}size();addEventListener('resize',size);
+(function f(){b.x+=b.vx;b.y+=b.vy;
+// Clamp and point velocity inward, so a shrinking pane can't strand the ball off-screen.
+if(b.x<10){b.x=10;b.vx=Math.abs(b.vx)}if(b.x>c.width-10){b.x=Math.max(10,c.width-10);b.vx=-Math.abs(b.vx)}
+if(b.y<10){b.y=10;b.vy=Math.abs(b.vy)}if(b.y>c.height-10){b.y=Math.max(10,c.height-10);b.vy=-Math.abs(b.vy)}
+x.fillStyle='rgba(17,17,17,.25)';x.fillRect(0,0,c.width,c.height);x.fillStyle='#5b8cff';x.beginPath();x.arc(b.x,b.y,10,0,7);x.fill();requestAnimationFrame(f)})();
+console.log('bouncer started');console.error('demo error: this is intentional');
+</script></body></html>"""
+
+INLINE_HTML = """<svg viewBox="0 0 200 60" width="100%" height="60"><rect width="200" height="60" rx="8" fill="#2f6fed"/>
+<text x="100" y="37" fill="#fff" text-anchor="middle" font-family="sans-serif">Hello from a widget</text></svg>
+<script>console.log('inline widget loaded at', new Date().toISOString())</script>"""
+
+
+def chunk(delta, finish=None):
+    return {"id": "mock", "object": "chat.completion.chunk", "model": "mock-1",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+
+class Handler(BaseHTTPRequestHandler):
+    key = None
+    no_tools = False
+
+    def cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.cors()
+        self.end_headers()
+
+    def authorized(self):
+        if not self.key or self.headers.get("Authorization") == f"Bearer {self.key}":
+            return True
+        self.send_response(401)
+        self.cors()
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"error": {"message": "invalid api key"}}).encode())
+        return False
+
+    def do_GET(self):
+        if not self.path.rstrip("/").endswith("/models"):
+            return self.send_error(404)
+        if not self.authorized():
+            return
+        body = json.dumps({"object": "list", "data": [{"id": "mock-1"}, {"id": "mock-2"}]}).encode()
+        self.send_response(200)
+        self.cors()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if not self.path.rstrip("/").endswith("/chat/completions"):
+            return self.send_error(404)
+        if not self.authorized():
+            return
+        req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        msgs = req.get("messages", [])
+        has_tools = bool(req.get("tools"))
+        if has_tools and self.no_tools:
+            body = json.dumps({"error": {"message": "tools param requires --jinja flag"}}).encode()
+            self.send_response(500)
+            self.cors()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(200)
+        self.cors()
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        try:
+            self.respond(msgs, has_tools)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def emit(self, obj, split=True):
+        data = f"data: {json.dumps(obj)}\n\n".encode()
+        parts = [data[: len(data) // 2], data[len(data) // 2:]] if split else [data]
+        for p in parts:
+            self.wfile.write(p)
+            self.wfile.flush()
+            time.sleep(0.01)
+
+    def stream_text(self, text, field="content"):
+        for i in range(0, len(text), 6):
+            self.emit(chunk({field: text[i:i + 6]}))
+
+    def tool_call(self, name, args):
+        raw = json.dumps(args)
+        self.emit(chunk({"role": "assistant", "tool_calls": [
+            {"index": 0, "id": "call_1", "type": "function", "function": {"name": name, "arguments": ""}}]}))
+        for i in range(0, len(raw), 40):
+            self.emit(chunk({"tool_calls": [{"index": 0, "function": {"arguments": raw[i:i + 40]}}]}))
+        self.emit(chunk({}, "tool_calls"))
+
+    def respond(self, msgs, has_tools):
+        last = msgs[-1] if msgs else {}
+        user = next((m.get("content") or "" for m in reversed(msgs) if m.get("role") == "user"), "")
+        if last.get("role") == "tool":
+            self.stream_text("Done. The tool reported:\n\n```\n" + last.get("content", "") + "\n```")
+        elif has_tools and "pane" in user.lower():
+            self.stream_text("Opening a pane for you.")
+            self.tool_call("open_pane", {"id": "bouncer", "title": "Bouncer", "html": PANE_HTML})
+            return self.end_stream()
+        elif has_tools and "inline" in user.lower():
+            self.tool_call("render_inline", {"title": "SVG demo", "html": INLINE_HTML})
+            return self.end_stream()
+        else:
+            if "think" in user.lower():
+                self.stream_text("Let me consider this carefully... ok.", field="reasoning_content")
+            self.stream_text(
+                f"You said: **{user}**\n\n| tools sent | messages |\n|---|---|\n| {has_tools} | {len(msgs)} |\n\n"
+                "Here is a runnable block:\n\n```html\n<button onclick=\"this.textContent='clicked!'\">Click me</button>\n```\n")
+        self.emit(chunk({}, "stop"))
+        self.end_stream()
+
+    def end_stream(self):
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8099)
+    ap.add_argument("--key", default=None)
+    ap.add_argument("--no-tools", action="store_true")
+    a = ap.parse_args()
+    Handler.key = a.key
+    Handler.no_tools = a.no_tools
+    print(f"mock server on http://localhost:{a.port}/v1" + (f" (key: {a.key})" if a.key else ""))
+    ThreadingHTTPServer(("127.0.0.1", a.port), Handler).serve_forever()

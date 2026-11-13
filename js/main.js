@@ -1,0 +1,480 @@
+import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
+import { listModels, streamChat } from './api.js';
+import { TOOL_DEFS, TOOL_SYSTEM_HINT, runTool } from './tools.js';
+import { createFrame } from './frames.js';
+import { createPaneManager } from './panes.js';
+import { renderMarkdown } from './markdown.js';
+
+const MAX_TOOL_ROUNDS = 10;
+const $ = (id) => document.getElementById(id);
+
+// The page has two faces: without a `#c=` link it is a link builder; with one it is the chat.
+// All state lives in memory only. Nothing is written to localStorage/sessionStorage/cookies,
+// and the address bar only changes when the user presses Connect. Reloading is "clear chat".
+const state = {
+  cfg: { baseUrl: '', apiKey: '', model: '', system: '' },
+  // Tools are always offered; if the server rejects them we fall back for the rest of the session.
+  toolsSupported: true,
+  messages: [],
+  busy: false,
+  abort: null,
+};
+
+const el = {
+  messages: $('messages'),
+  empty: $('empty'),
+  prompt: $('prompt'),
+  send: $('send-btn'),
+  status: $('status'),
+  panesShow: $('panes-show'),
+  cfgModel: $('cfg-model'),
+  cfgStatus: $('cfg-status'),
+  resizer: $('resizer'),
+  aside: $('panes'),
+};
+
+const panes = createPaneManager({
+  aside: el.aside,
+  tabs: $('pane-tabs'),
+  body: $('pane-body'),
+  onChange: () => {
+    el.panesShow.hidden = panes.count === 0 || panes.visible;
+    el.resizer.hidden = !panes.visible;
+  },
+});
+
+// ---------------------------------------------------------------- startup
+
+function init() {
+  // Connect, Back/Forward, or pasting another link into this tab: start over with the new hash.
+  window.addEventListener('hashchange', () => location.reload());
+
+  let shared = null;
+  let linkError = null;
+  try {
+    shared = readShareFromHash(location.hash);
+  } catch (e) {
+    linkError = e;
+  }
+
+  if (!shared) {
+    $('setup').hidden = false;
+    wireSetup();
+    if (linkError) showSetupStatus('error', linkError.message);
+    $('cfg-baseurl').focus();
+    return;
+  }
+
+  $('app').hidden = false;
+  state.cfg = { ...state.cfg, ...shared, baseUrl: normalizeBaseUrl(shared.baseUrl) };
+  wireComposer();
+  wireLayout();
+  connect();
+  el.prompt.focus();
+}
+
+async function connect() {
+  setStatus('pending', 'Connecting…');
+  const { baseUrl, apiKey } = state.cfg;
+  try {
+    const models = await listModels({ baseUrl, apiKey });
+    // With no model chosen, the field is omitted and the server picks; but some servers (Ollama)
+    // require one, so fill it in when the choice is unambiguous.
+    if (!state.cfg.model && models.length === 1) state.cfg.model = models[0];
+    setStatus('ok', `Connected${state.cfg.model ? ` · ${state.cfg.model}` : ''}`);
+  } catch (e) {
+    // Some servers have no /models endpoint; chat may still work, so don't block.
+    setStatus('warn', `Model list unavailable: ${e.message}`);
+    notice(`Couldn't list models: ${e.message}`, 'warn');
+  }
+}
+
+function setStatus(kind, text) {
+  el.status.dataset.state = kind;
+  el.status.title = text;
+  el.status.setAttribute('aria-label', text);
+}
+
+// ---------------------------------------------------------------- setup (link builder)
+
+function readSetupForm() {
+  return {
+    baseUrl: normalizeBaseUrl($('cfg-baseurl').value),
+    apiKey: $('cfg-apikey').value.trim(),
+    model: el.cfgModel.value,
+    system: $('cfg-system').value,
+  };
+}
+
+function setModelOptions(models, selected) {
+  const options = [new Option('Server default', '')];
+  for (const m of models) options.push(new Option(m, m, false, m === selected));
+  el.cfgModel.replaceChildren(...options);
+  el.cfgModel.value = models.includes(selected) ? selected : models.length === 1 ? models[0] : '';
+}
+
+function showSetupStatus(kind, text) {
+  el.cfgStatus.dataset.kind = kind;
+  el.cfgStatus.textContent = text;
+}
+
+let modelsRequest = 0;
+async function refreshModels() {
+  const cfg = readSetupForm();
+  if (!cfg.baseUrl) return;
+  const req = ++modelsRequest;
+  showSetupStatus('', 'Connecting…');
+  try {
+    const models = await listModels(cfg);
+    if (req !== modelsRequest) return;
+    setModelOptions(models, cfg.model);
+    showSetupStatus('ok', `Connected — ${models.length} model${models.length === 1 ? '' : 's'} available.`);
+  } catch (e) {
+    if (req !== modelsRequest) return;
+    showSetupStatus('error', e.message);
+  }
+  updateShareLink();
+}
+
+function currentLink() {
+  const cfg = readSetupForm();
+  return cfg.baseUrl ? buildShareLink(location.href, cfg) : '';
+}
+
+function updateShareLink() {
+  $('share-link').value = currentLink();
+}
+
+function wireSetup() {
+  const form = $('setup-form');
+  form.addEventListener('input', updateShareLink);
+  // `change` fires on blur/commit, so typing a URL doesn't spam requests.
+  $('cfg-baseurl').addEventListener('change', refreshModels);
+  $('cfg-apikey').addEventListener('change', refreshModels);
+  $('cfg-test').addEventListener('click', refreshModels);
+
+  $('copy-share').addEventListener('click', async () => {
+    const input = $('share-link');
+    if (!input.value) return;
+    try {
+      await navigator.clipboard.writeText(input.value);
+      flash($('copy-share'), 'Copied');
+    } catch {
+      input.select();
+      flash($('copy-share'), 'Press ⌘/Ctrl+C');
+    }
+  });
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const link = currentLink();
+    if (link) location.href = link; // the hashchange handler reloads into chat mode
+  });
+}
+
+function flash(btn, text) {
+  const old = btn.textContent;
+  btn.textContent = text;
+  setTimeout(() => (btn.textContent = old), 1500);
+}
+
+// ---------------------------------------------------------------- composer
+
+function wireComposer() {
+  const form = $('composer');
+  el.prompt.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  el.prompt.addEventListener('input', autosize);
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (state.busy) { state.abort?.abort(); return; }
+    const text = el.prompt.value.trim();
+    if (!text) return;
+    el.prompt.value = '';
+    autosize();
+    sendMessage(text);
+  });
+}
+
+function autosize() {
+  el.prompt.style.height = 'auto';
+  el.prompt.style.height = `${Math.min(el.prompt.scrollHeight, 240)}px`;
+}
+
+function setBusy(busy) {
+  state.busy = busy;
+  el.send.textContent = busy ? 'Stop' : 'Send';
+  el.send.classList.toggle('danger', busy);
+  if (!busy) el.prompt.focus();
+}
+
+// ---------------------------------------------------------------- conversation
+
+function buildRequest() {
+  const toolsOn = state.toolsSupported;
+  const system = [state.cfg.system, toolsOn && TOOL_SYSTEM_HINT].filter(Boolean).join('\n\n');
+  let history = state.messages;
+  if (!toolsOn) {
+    // Servers reject tool messages when no tools are declared; strip them from the history.
+    history = history
+      .filter((m) => m.role !== 'tool')
+      .map((m) => (m.tool_calls ? { role: m.role, content: m.content } : m))
+      .filter((m) => m.role !== 'assistant' || m.content);
+  }
+  const body = { messages: system ? [{ role: 'system', content: system }, ...history] : history };
+  if (state.cfg.model) body.model = state.cfg.model;
+  if (toolsOn) body.tools = TOOL_DEFS;
+  return body;
+}
+
+/** Does this error look like the server refusing the `tools` parameter? */
+function isToolRejection(err) {
+  return state.toolsSupported && err.status >= 400 && err.status < 600 && /tool|jinja|function.?call/i.test(err.message);
+}
+
+async function sendMessage(text) {
+  state.messages.push({ role: 'user', content: text });
+  addUserMessage(text);
+  await runTurn();
+}
+
+async function runTurn() {
+  const ctrl = new AbortController();
+  state.abort = ctrl;
+  setBusy(true);
+  try {
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const view = createAssistantView();
+      let partial = null;
+      let result;
+      try {
+        result = await streamChat({
+          baseUrl: state.cfg.baseUrl,
+          apiKey: state.cfg.apiKey,
+          body: buildRequest(),
+          signal: ctrl.signal,
+          onUpdate: (p) => { partial = p; view.update(p); },
+        });
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          if (partial?.content) {
+            state.messages.push({ role: 'assistant', content: partial.content });
+            view.finish(partial, { stopped: true });
+          } else view.remove();
+          return;
+        }
+        if (isToolRejection(e)) {
+          state.toolsSupported = false;
+          view.remove();
+          notice('This server doesn’t accept tool calls, so widgets and panes are off for this session.', 'warn');
+          round--;
+          continue;
+        }
+        view.fail(e, () => { view.remove(); runTurn(); });
+        return;
+      }
+
+      view.finish(result);
+      const msg = { role: 'assistant', content: result.content };
+      if (result.toolCalls.length) msg.tool_calls = result.toolCalls;
+      state.messages.push(msg);
+      if (!result.toolCalls.length) return;
+
+      for (const call of result.toolCalls) {
+        const chip = view.addToolCall(call);
+        let output;
+        try {
+          output = await runTool(call.function.name, call.function.arguments, { mountInline: view.mountInline, panes });
+        } catch (e) {
+          output = `Error: ${e.message}`;
+        }
+        chip.done(output);
+        state.messages.push({ role: 'tool', tool_call_id: call.id, content: output });
+      }
+      if (ctrl.signal.aborted) return;
+    }
+    notice(`Stopped after ${MAX_TOOL_ROUNDS} consecutive tool rounds. Send a message to continue.`, 'warn');
+  } finally {
+    state.abort = null;
+    setBusy(false);
+  }
+}
+
+// ---------------------------------------------------------------- message views
+
+function append(node) {
+  el.empty.hidden = true;
+  const stick = el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight < 80;
+  el.messages.append(node);
+  if (stick) el.messages.scrollTop = el.messages.scrollHeight;
+  return node;
+}
+
+function scrollIfNear() {
+  const m = el.messages;
+  if (m.scrollHeight - m.scrollTop - m.clientHeight < 160) m.scrollTop = m.scrollHeight;
+}
+
+function h(tag, className, text) {
+  const n = document.createElement(tag);
+  if (className) n.className = className;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+function addUserMessage(text) {
+  append(h('div', 'msg user', text));
+}
+
+function notice(text, kind = 'info') {
+  append(h('div', `notice ${kind}`, text));
+}
+
+let codeRunCounter = 0;
+
+function decorateCode(pre, code, host) {
+  const bar = h('div', 'code-actions');
+  const run = h('button', 'ghost small', '▶ Run');
+  run.type = 'button';
+  run.addEventListener('click', () => host.append(widgetCard({ id: `code-${++codeRunCounter}`, title: 'Code preview', html: code })));
+  const pane = h('button', 'ghost small', '⧉ Open in pane');
+  pane.type = 'button';
+  pane.addEventListener('click', () => { const id = `code-${++codeRunCounter}`; panes.open(id, `Preview ${codeRunCounter}`, code); });
+  bar.append(run, pane);
+  pre.before(bar);
+}
+
+function createAssistantView() {
+  const root = append(h('div', 'msg assistant pending'));
+  const thinking = h('details', 'reasoning');
+  thinking.hidden = true;
+  thinking.open = true;
+  thinking.append(h('summary', null, 'Thinking'));
+  const thinkingText = h('div', 'reasoning-text');
+  thinking.append(thinkingText);
+  const body = h('div', 'md');
+  const extras = h('div', 'extras');
+  root.append(thinking, body, extras);
+
+  let latest = null;
+  let scheduled = false;
+  let finished = false;
+  const render = () => {
+    scheduled = false;
+    if (!latest || finished) return;
+    if (latest.reasoning) { thinking.hidden = false; thinkingText.textContent = latest.reasoning; }
+    renderMarkdown(body, latest.content);
+    const pendingCalls = latest.toolCalls.map((c) => c.function.name).filter(Boolean);
+    root.dataset.calling = pendingCalls.length ? `Preparing ${pendingCalls.join(', ')}…` : '';
+    if (latest.content || latest.reasoning || pendingCalls.length) root.classList.remove('pending');
+    scrollIfNear();
+  };
+
+  return {
+    update(p) {
+      latest = p;
+      if (!scheduled) { scheduled = true; requestAnimationFrame(render); }
+    },
+    finish(p, { stopped = false } = {}) {
+      latest = p;
+      render();
+      finished = true; // a still-queued animation-frame render must not overwrite the final one
+      root.classList.remove('pending');
+      root.dataset.calling = '';
+      thinking.open = false;
+      renderMarkdown(body, p.content, (pre, code) => decorateCode(pre, code, extras));
+      if (!p.content && !p.reasoning && !p.toolCalls.length) body.append(h('em', 'muted', '(empty response)'));
+      if (stopped) body.append(h('div', 'muted small', '— stopped'));
+      if (p.finishReason === 'length') body.append(h('div', 'muted small', '— cut off (max tokens reached)'));
+    },
+    addToolCall(call) {
+      root.classList.remove('pending');
+      const d = h('details', 'tool-call running');
+      const sum = h('summary');
+      let args = {};
+      try { args = JSON.parse(call.function.arguments || '{}'); } catch {}
+      sum.append(h('span', 'tool-name', call.function.name), h('span', 'tool-target', args.title || args.id || ''), h('span', 'tool-status', 'running…'));
+      const argPre = h('pre', 'tool-args', truncate(call.function.arguments, 4000));
+      const outPre = h('pre', 'tool-output');
+      d.append(sum, argPre, outPre);
+      extras.append(d);
+      scrollIfNear();
+      return {
+        done(output) {
+          d.classList.remove('running');
+          const failed = /^Error:|\[error\]/m.test(output);
+          d.classList.toggle('has-errors', failed);
+          sum.querySelector('.tool-status').textContent = failed ? 'done · errors' : 'done';
+          outPre.textContent = output;
+        },
+      };
+    },
+    mountInline: (widget) => { extras.append(widgetCard(widget)); scrollIfNear(); },
+    fail(err, retry) {
+      root.classList.remove('pending');
+      root.classList.add('error');
+      body.textContent = err.message;
+      const row = h('div', 'retry-row');
+      const b = h('button', 'ghost small', 'Retry');
+      b.type = 'button';
+      b.addEventListener('click', retry);
+      row.append(b);
+      body.append(row);
+    },
+    remove: () => root.remove(),
+  };
+}
+
+function widgetCard({ id, title, html, height }) {
+  const maxH = Math.max(80, Math.min(Number(height) || 480, 2000));
+  const fig = h('figure', 'widget');
+  const cap = h('figcaption');
+  cap.append(h('span', 'widget-title', title || 'Widget'));
+  const pop = h('button', 'icon-btn', '⧉');
+  pop.type = 'button';
+  pop.title = 'Open in side pane';
+  pop.addEventListener('click', () => panes.open(`${id}-pane`, title || id, html));
+  cap.append(pop);
+  const frame = createFrame(id, html, {
+    title: title || id,
+    onResize: (px) => { frame.style.height = `${Math.min(Math.max(px, 40), maxH)}px`; },
+  });
+  frame.style.height = `${Math.min(160, maxH)}px`;
+  fig.append(cap, frame);
+  return fig;
+}
+
+function truncate(s, n) {
+  s = String(s ?? '');
+  return s.length > n ? `${s.slice(0, n)}… (${s.length - n} more chars)` : s;
+}
+
+// ---------------------------------------------------------------- layout: panes + resizer
+
+function wireLayout() {
+  el.panesShow.addEventListener('click', () => panes.show());
+  $('panes-hide').addEventListener('click', () => panes.hide());
+
+  el.resizer.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    el.resizer.setPointerCapture(e.pointerId);
+    document.body.classList.add('resizing');
+    const move = (ev) => {
+      const w = Math.min(Math.max(window.innerWidth - ev.clientX, 280), window.innerWidth - 320);
+      document.documentElement.style.setProperty('--pane-width', `${w}px`);
+    };
+    const up = () => {
+      document.body.classList.remove('resizing');
+      el.resizer.removeEventListener('pointermove', move);
+      el.resizer.removeEventListener('pointerup', up);
+    };
+    el.resizer.addEventListener('pointermove', move);
+    el.resizer.addEventListener('pointerup', up);
+  });
+}
+
+init();

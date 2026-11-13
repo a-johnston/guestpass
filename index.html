@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Chat Bridge</title>
+  <link rel="stylesheet" href="css/app.css" />
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+  <!-- Without a #c= link: build one. With one: chat. -->
+  <section id="setup" hidden>
+    <form id="setup-form">
+      <h1>Chat Bridge</h1>
+      <p class="hint">Make a link to any OpenAI-compatible server. Opening the link connects straight to the chat.</p>
+      <label>Server base URL
+        <input id="cfg-baseurl" type="url" placeholder="https://llm.example.com:8443/v1" required />
+        <small>The OpenAI-compatible API root (the part before <code>/chat/completions</code>).</small>
+      </label>
+      <label>API key
+        <input id="cfg-apikey" type="password" placeholder="optional" autocomplete="off" />
+      </label>
+      <label>Model
+        <select id="cfg-model"><option value="">Server default</option></select>
+        <small>Filled from the server once the URL and key are entered.</small>
+      </label>
+      <label>System prompt
+        <textarea id="cfg-system" rows="3" placeholder="optional"></textarea>
+      </label>
+      <p id="cfg-status" class="hint" role="status"></p>
+      <fieldset class="share">
+        <legend>Link</legend>
+        <p class="hint">Contains the URL, key, model and system prompt. Anyone with it can use the server.</p>
+        <div class="row">
+          <input id="share-link" readonly aria-label="Link" />
+          <button type="button" id="copy-share">Copy</button>
+        </div>
+      </fieldset>
+      <div class="actions">
+        <button type="button" id="cfg-test" class="ghost">Test connection</button>
+        <span class="spacer"></span>
+        <button type="submit" class="primary">Connect</button>
+      </div>
+    </form>
+  </section>
+
+  <div id="app" hidden>
+    <section id="chat-col">
+      <header id="topbar">
+        <strong class="brand">Chat Bridge</strong>
+        <span id="status" class="status" data-state="idle" role="img" title="Not connected" aria-label="Not connected"><span class="dot"></span></span>
+        <span class="spacer"></span>
+        <button type="button" id="panes-show" class="icon-btn" title="Show panes" aria-label="Show panes" hidden>⇤</button>
+      </header>
+
+      <main id="messages" aria-live="polite">
+        <div id="empty" class="empty">
+          <h1>Chat Bridge</h1>
+          <p>Say hello.</p>
+        </div>
+      </main>
+
+      <form id="composer">
+        <textarea id="prompt" rows="1" placeholder="Message…  (Enter to send, Shift+Enter for newline)" autocomplete="off"></textarea>
+        <button id="send-btn" type="submit" class="primary">Send</button>
+      </form>
+    </section>
+
+    <div id="resizer" role="separator" aria-orientation="vertical" hidden></div>
+
+    <aside id="panes" hidden>
+      <div class="pane-bar">
+        <div id="pane-tabs" role="tablist"></div>
+        <button type="button" id="panes-hide" class="icon-btn" title="Hide panes" aria-label="Hide panes">⇥</button>
+      </div>
+      <div id="pane-body"></div>
+    </aside>
+  </div>
+</body>
+</html>
