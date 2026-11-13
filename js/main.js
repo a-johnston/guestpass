@@ -7,6 +7,14 @@ import { renderMarkdown } from './markdown.js';
 import { sessionToMarkdown, formatDuration, formatSeconds } from './session.js';
 
 const MAX_TOOL_ROUNDS = 10;
+
+/** One-click prompts on the empty chat; each exercises a different part of the tool set. */
+const STARTER_PROMPTS = [
+  'Generate an SVG of a pelican riding a bicycle',
+  'Plot a sine wave with sliders for amplitude and frequency',
+  'Build a small snake game in a side pane',
+  'Make a color picker widget that changes the background of a second widget',
+];
 const PROMPT_MAX_PX = 240;
 const $ = (id) => document.getElementById(id);
 
@@ -309,6 +317,17 @@ function wireComposer() {
     }
   });
   autosize();
+
+  // Starter prompts go through the normal submit path (so they queue while connecting).
+  for (const text of STARTER_PROMPTS) {
+    const b = h('button', 'starter', text);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      el.prompt.value = text;
+      form.requestSubmit();
+    });
+    $('starters').append(b);
+  }
 }
 
 function autosize() {

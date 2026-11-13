@@ -112,6 +112,12 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .empty { text-align: center; color: var(--muted); margin-top: 12vh; }
 .empty h1 { color: var(--text); font-size: 26px; margin: 0 0 6px; }
 .empty[hidden] { display: none; }
+.starters { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; max-width: 640px; margin: 16px auto 0; }
+.starter {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+  padding: 6px 14px; font-size: 13px; color: var(--text); text-align: left;
+}
+.starter:hover { border-color: var(--accent); }
 
 .msg { border-radius: var(--radius); overflow-wrap: anywhere; }
 .msg.user {
