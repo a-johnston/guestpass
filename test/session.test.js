@@ -33,6 +33,21 @@ test('includes the system prompt as a quote, never connection details', () => {
   assert.doesNotMatch(md, /Model:/, 'model line omitted when unknown');
 });
 
+test('thinking is a collapsed, quoted block above the reply, with its duration', () => {
+  const md = sessionToMarkdown([
+    { role: 'user', content: 'hm?' },
+    { role: 'assistant', content: 'Answer.', reasoning: 'First idea.\n\nSecond </details> idea.', thinkingMs: 12400 },
+    { role: 'assistant', content: 'No timing.', reasoning: 'x' },
+  ], { savedAt });
+  assert.match(md, /## Assistant\n\n<details>\n<summary>Thought for 12 seconds<\/summary>\n\n> First idea\.\n> \n> Second &lt;\/details> idea\.\n\n<\/details>\n\nAnswer\./);
+  assert.match(md, /<summary>Thinking<\/summary>\n\n> x\n\n<\/details>\n\nNo timing\./);
+});
+
+test('formatDuration', async () => {
+  const { formatDuration } = await import('../js/session.js');
+  assert.deepEqual([400, 1000, 12400, 125000].map(formatDuration), ['1 second', '1 second', '12 seconds', '2m 5s']);
+});
+
 test('unparseable tool arguments are kept raw', () => {
   const md = sessionToMarkdown([{ role: 'assistant', tool_calls: [{ id: 'x', function: { name: 'patch', arguments: '{oops' } }] }], { savedAt });
   assert.match(md, /<summary>Tool call: patch<\/summary>\n\n```\n\{oops\n```/);

@@ -4,7 +4,7 @@ import { TOOL_DEFS, TOOL_SYSTEM_HINT, runTool } from './tools.js';
 import { createFrame, removeFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
-import { sessionToMarkdown } from './session.js';
+import { sessionToMarkdown, formatDuration, formatSeconds } from './session.js';
 
 const MAX_TOOL_ROUNDS = 10;
 const PROMPT_MAX_PX = 240;
@@ -298,7 +298,8 @@ function pushUser(text) {
 function buildRequest() {
   const toolsOn = state.toolsSupported;
   const system = [state.cfg.system, toolsOn && TOOL_SYSTEM_HINT].filter(Boolean).join('\n\n');
-  let history = state.messages;
+  // Assistant messages keep their thinking locally (for the transcript); it is never sent back.
+  let history = state.messages.map(({ reasoning, thinkingMs, ...m }) => m);
   if (!toolsOn) {
     // Servers reject tool messages when no tools are declared; strip them from the history.
     history = history
@@ -310,6 +311,15 @@ function buildRequest() {
   if (state.cfg.model) body.model = state.cfg.model;
   if (toolsOn) body.tools = TOOL_DEFS;
   return body;
+}
+
+/** Attaches a reply's thinking (text + duration) for the transcript; buildRequest strips it. */
+function withThinking(msg, reasoning, view) {
+  if (reasoning) {
+    msg.reasoning = reasoning;
+    msg.thinkingMs = view.thinkingMs();
+  }
+  return msg;
 }
 
 /** Does this error look like the server refusing the `tools` parameter? */
@@ -356,9 +366,9 @@ async function runTurn() {
         if (e.name === 'AbortError') {
           // Keep what was said so far; half-streamed tool calls are dropped.
           const kept = { content: partial?.content || '', reasoning: partial?.reasoning || '', toolCalls: [], finishReason: null };
-          if (kept.content) state.messages.push({ role: 'assistant', content: kept.content });
           if (kept.content || kept.reasoning) view.finish(kept, { stopped: true });
           else view.remove();
+          if (kept.content) state.messages.push(withThinking({ role: 'assistant', content: kept.content }, kept.reasoning, view));
           if (state.interrupt && !state.stopRequested) continue;
           return;
         }
@@ -375,7 +385,7 @@ async function runTurn() {
       state.stream = null;
 
       view.finish(result);
-      const msg = { role: 'assistant', content: result.content };
+      const msg = withThinking({ role: 'assistant', content: result.content }, result.reasoning, view);
       if (result.toolCalls.length) msg.tool_calls = result.toolCalls;
       state.messages.push(msg);
       if (!result.toolCalls.length) {
@@ -474,14 +484,6 @@ function notice(text, kind = 'info') {
   append(h('div', `notice ${kind}`, text));
 }
 
-function formatDuration(ms) {
-  return formatSeconds(Math.max(1, Math.round(ms / 1000)));
-}
-
-function formatSeconds(s) {
-  if (s < 60) return `${s} second${s === 1 ? '' : 's'}`;
-  return `${Math.floor(s / 60)}m ${s % 60}s`;
-}
 
 let codeRunCounter = 0;
 
@@ -623,6 +625,7 @@ function createAssistantView() {
       row.append(b);
       body.append(row);
     },
+    thinkingMs: () => (thinkStart && thinkEnd ? thinkEnd - thinkStart : 0),
     remove: () => { endThinking(); root.remove(); },
   };
 }

@@ -26,12 +26,30 @@ export function sessionToMarkdown(messages, { model = '', system = '', savedAt =
       out.push((m.content ?? '').trimEnd(), '');
     } else if (m.role === 'assistant') {
       heading('Assistant'); // one heading per turn, even across several tool rounds
+      if (m.reasoning) out.push(...thinkingBlock(m.reasoning, m.thinkingMs));
       if (m.content) out.push(m.content.trimEnd(), '');
       for (const call of m.tool_calls || []) out.push(...toolCallBlock(call, results.get(call.id)));
     }
     // role "tool" is rendered with the call that produced it
   }
   return `${out.join('\n').trimEnd()}\n`;
+}
+
+/** Collapsed like in the app. Quoted so it reads as an aside; a literal </details> can't close the block early. */
+function thinkingBlock(reasoning, ms) {
+  const summary = ms ? `Thought for ${formatDuration(ms)}` : 'Thinking';
+  const body = quote(reasoning.replace(/<\/details/gi, '&lt;/details'));
+  return ['<details>', `<summary>${summary}</summary>`, '', body, '', '</details>', ''];
+}
+
+/** "12 seconds", "1 second", "2m 5s"; at least 1 second. Shared with the live header in the app. */
+export function formatDuration(ms) {
+  return formatSeconds(Math.max(1, Math.round(ms / 1000)));
+}
+
+export function formatSeconds(s) {
+  if (s < 60) return `${s} second${s === 1 ? '' : 's'}`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
 function toolCallBlock(call, result) {
