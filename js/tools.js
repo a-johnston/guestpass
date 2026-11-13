@@ -1,18 +1,13 @@
 // Tools the model can call. They run entirely in this page: HTML is rendered into sandboxed
 // iframes, either inline in the chat or in a side pane. Widgets and panes share one id
 // namespace; rendering an id that already exists replaces it.
+//
+// Wording notes: facts about the page environment (sandbox, kv, onPatch) live once in
+// TOOL_SYSTEM_HINT rather than in each html parameter; tool descriptions state contracts
+// (what is returned, scope, failure modes) rather than lists of use cases.
 import { getFrame, settle, formatLogs, patchFrame, updateKv } from './frames.js';
 
-const htmlParam = {
-  type: 'string',
-  description:
-    'HTML to render: a fragment or a complete document, with <style>/<script> inline or loaded from CDNs (e.g. https://cdn.jsdelivr.net). ' +
-    'Runs in a sandboxed iframe with no cookies/localStorage and no access to the chat page. Available globals: ' +
-    '`kv` — a key/value store shared live by every widget and pane (kv.get(k), kv.set(k, v), kv.delete(k), kv.all(), kv.subscribe((k, v) => …) which fires on every change; values must be JSON-serializable); ' +
-    'and if the page defines `window.onPatch = (data) => result`, the patch tool can update it without a reload.',
-};
-
-const idParam = (what) => ({ type: 'string', description: `Id of the ${what}.` });
+const idParam = { type: 'string', description: 'Id of the widget or pane.' };
 
 export const TOOL_DEFS = [
   {
@@ -20,16 +15,15 @@ export const TOOL_DEFS = [
     function: {
       name: 'render_inline',
       description:
-        'Render an interactive HTML/CSS/JS widget directly in the chat, as part of your reply. Good for small demos, charts, SVG drawings, diagrams, and UI snippets. ' +
-        'Pass an id to be able to replace it later: rendering the same id again removes the earlier widget (use this when fixing a broken widget). ' +
-        'Returns the widget id and any console output or errors after it loads.',
+        'Render HTML as a widget inside the chat. Returns its id and the console output after load. ' +
+        'Rendering an existing id replaces that widget; this is how to fix a broken one.',
       parameters: {
         type: 'object',
         properties: {
-          html: htmlParam,
-          id: { type: 'string', description: 'Optional stable id, e.g. "sine-chart". Reuse it to replace the widget.' },
-          title: { type: 'string', description: 'Short caption shown above the widget.' },
-          height: { type: 'integer', description: 'Max height in pixels (default 480). The widget shrinks to fit shorter content.' },
+          html: { type: 'string', description: 'A fragment or a full document.' },
+          id: { type: 'string', description: 'Optional stable id; reuse it to replace the widget.' },
+          title: { type: 'string', description: 'Caption shown above the widget.' },
+          height: { type: 'integer', description: 'Max height in px (default 480); shorter content shrinks to fit.' },
         },
         required: ['html'],
       },
@@ -40,15 +34,14 @@ export const TOOL_DEFS = [
     function: {
       name: 'open_pane',
       description:
-        'Open a side pane next to the chat showing a full web page or app (games, tools, larger visualizations, documents). ' +
-        'Calling it again with the same id reloads that pane with new content. For small live changes, prefer patch. ' +
-        'Returns any console output or errors after load.',
+        'Open a full page in a pane beside the chat, for apps, games and larger views. ' +
+        'Opening an existing id reloads that pane. Returns the console output after load.',
       parameters: {
         type: 'object',
         properties: {
-          id: { type: 'string', description: 'Stable id, e.g. "snake-game".' },
-          title: { type: 'string', description: 'Tab title.' },
-          html: htmlParam,
+          id: { type: 'string', description: 'Stable id; reuse it to reload the pane.' },
+          title: { type: 'string', description: 'Optional tab title (defaults to the id).' },
+          html: { type: 'string', description: 'A fragment or a full document.' },
         },
         required: ['id', 'html'],
       },
@@ -59,13 +52,14 @@ export const TOOL_DEFS = [
     function: {
       name: 'patch',
       description:
-        'Send a JSON payload to a running widget or pane without reloading it. The page receives it through its `window.onPatch = (data) => …` handler; ' +
-        'the handler\'s return value (or resolved promise value) is returned to you, along with any console output it produced.',
+        'Send JSON to one page\'s window.onPatch without reloading it. Returns the handler\'s return value plus any console output it produced. ' +
+        'Fails if the page defines no window.onPatch; nothing is installed by default. ' +
+        'Use patch to drive or query one page; use kv for state that several pages react to.',
       parameters: {
         type: 'object',
         properties: {
-          id: idParam('widget or pane'),
-          data: { description: 'Any JSON value passed to window.onPatch.' },
+          id: idParam,
+          data: { description: 'Any JSON value; passed to window.onPatch.' },
         },
         required: ['id', 'data'],
       },
@@ -76,12 +70,11 @@ export const TOOL_DEFS = [
     function: {
       name: 'kv',
       description:
-        'Read the key/value store shared by all widgets and panes (the `kv` global inside them), optionally changing it first. ' +
-        'Changes are pushed live to every open widget and pane, firing their kv.subscribe callbacks. Returns the whole store.',
+        'Read the shared key/value store, optionally setting keys first. Writes reach every open page through kv.subscribe. Returns the whole store.',
       parameters: {
         type: 'object',
         properties: {
-          set: { type: 'object', description: 'Keys to set; a null value deletes the key. Omit to just read.' },
+          set: { type: 'object', description: 'Keys to set; null deletes a key. Omit to only read.' },
         },
       },
     },
@@ -90,25 +83,29 @@ export const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'close',
-      description: 'Close a side pane or remove an inline widget, by id.',
-      parameters: { type: 'object', properties: { id: idParam('widget or pane') }, required: ['id'] },
+      description: 'Close a pane or remove a widget. It stops receiving kv updates; the store itself is unchanged.',
+      parameters: { type: 'object', properties: { id: idParam }, required: ['id'] },
     },
   },
   {
     type: 'function',
     function: {
       name: 'read_console',
-      description: 'Read console output and errors from a widget or pane since it was last rendered, e.g. after the user has interacted with it.',
-      parameters: { type: 'object', properties: { id: idParam('widget or pane') }, required: ['id'] },
+      description:
+        'Console output and errors from a page since it was last rendered, e.g. after the user interacted with it. ' +
+        'Shows console traffic only; to observe a page\'s state changes, have it log them.',
+      parameters: { type: 'object', properties: { id: idParam }, required: ['id'] },
     },
   },
 ];
 
-export const TOOL_SYSTEM_HINT =
-  'You are running in a browser chat client that can render web content. When a visual, interactive demo, diagram, or small app would help, ' +
-  'use render_inline (small, in the chat) or open_pane (larger, beside the chat) instead of only printing code. ' +
-  'Check the returned console output and fix errors by re-rendering with the same id. ' +
-  'Widgets and panes can talk to each other through the shared `kv` store, and you can update a running page with patch.';
+export const TOOL_SYSTEM_HINT = `You are in a browser chat client that can render web pages: render_inline puts a widget in the chat, open_pane opens a larger page beside it. When a visual or interactive result would help, use them instead of only printing code, and check the console output they return.
+
+Page environment (every widget and pane):
+- Sandboxed iframe: no cookies or localStorage, no access to the chat page. Scripts and styles may load from CDNs (e.g. https://cdn.jsdelivr.net).
+- kv: a key/value store shared live by all open pages and the kv tool. kv.get(k), kv.set(k, v), kv.delete(k), kv.all(). kv.subscribe((k, v) => …) fires on every change, including writes from other pages and the kv tool; v is undefined on delete. Values must be JSON-serializable. New pages start with the current contents. This is how pages talk to each other.
+- window.onPatch: a page that defines window.onPatch = (data) => result can be updated in place with the patch tool. Pages that don't define it reject patches.
+- Widgets and panes share one id namespace.`;
 
 const MAX_RESULT_CHARS = 8000;
 let autoId = 0;

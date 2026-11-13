@@ -56,7 +56,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .brand { font-size: 15px; }
 .spacer { flex: 1; }
-.status { display: inline-flex; align-items: center; padding: 4px; cursor: help; }
+.status { display: inline-flex; align-items: center; padding: 4px; }
 .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .status[data-state="ok"] .dot { background: var(--ok); }
 .status[data-state="warn"] .dot { background: var(--warn); }

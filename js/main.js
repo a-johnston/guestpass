@@ -100,7 +100,6 @@ async function connect() {
 
 function setStatus(kind, text) {
   el.status.dataset.state = kind;
-  el.status.title = text;
   el.status.setAttribute('aria-label', text);
 }
 
