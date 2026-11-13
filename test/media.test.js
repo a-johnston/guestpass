@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fitWithin, imageTokens, classifyFile, looksLikeText, pickImageMime, MAX_IMAGE_PIXELS, IMAGE_QUALITY } from '../js/media.js';
+import { fitWithin, imageTokens, classifyFile, looksLikeText, pickImageMime, formatBytes, MAX_IMAGE_PIXELS, IMAGE_QUALITY } from '../js/media.js';
+
+test('formatBytes', () => {
+  assert.deepEqual([950, 55_000, 1_900_000].map(formatBytes), ['950 B', '54 KB', '1.8 MB']);
+});
 
 test('limits from the spec', () => {
   assert.equal(MAX_IMAGE_PIXELS, 1024 * 1024);

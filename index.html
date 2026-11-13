@@ -72,7 +72,10 @@
       </main>
 
       <div id="queue" aria-live="polite" hidden></div>
+      <div id="attachments" class="attachments" aria-live="polite" hidden></div>
       <form id="composer">
+        <button type="button" id="attach-btn" class="attach-btn" title="Attach files" aria-label="Attach files">+</button>
+        <input type="file" id="attach-input" multiple hidden />
         <div class="prompt-wrap">
           <textarea id="prompt" rows="1" autocomplete="off" aria-label="Message"></textarea>
           <button id="stop-btn" type="button" class="stop-btn" title="Stop generating (Esc)" aria-label="Stop generating" hidden></button>

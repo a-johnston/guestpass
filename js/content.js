@@ -20,6 +20,12 @@ export function mergeContent(a, b) {
   return [...asParts(a), ...asParts(b)];
 }
 
+/** A user message's content: the text alone, or text plus attachment parts. */
+export function userContent(text, parts = []) {
+  if (!parts.length) return text;
+  return [...(text ? [textPart(text)] : []), ...parts];
+}
+
 /** "image: cat.jpg", "file: spec.pdf", or 'screenshot of "app"'. */
 export function mediaLabel(part) {
   const m = part.meta || {};

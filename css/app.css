@@ -228,6 +228,28 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 }
 .queued-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; flex: none; }
 .queued-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queued-count { color: var(--muted); font-size: 12px; flex: none; }
+
+/* ---------- attachments: the tray above the composer, and the row inside a sent message */
+.attach-btn { height: 44px; width: 44px; padding: 0; border-radius: 12px; font-size: 22px; line-height: 1; color: var(--muted); flex: none; }
+.attach-btn:hover { color: var(--text); }
+#chat-col.dropping #composer .prompt-wrap textarea { border-color: var(--accent); }
+.attachments { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; max-width: 892px; margin: 0 auto; padding: 6px 16px 0; }
+.chip {
+  display: flex; align-items: center; gap: 6px; max-width: 260px; padding: 3px 4px 3px 3px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+}
+.chip img { width: 40px; height: 40px; object-fit: cover; border-radius: 5px; display: block; flex: none; }
+.chip-file { padding: 0 4px 0 6px; font-weight: 600; }
+.chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.chip-size { color: var(--muted); flex: none; font-variant-numeric: tabular-nums; }
+.chip.busy { opacity: .6; }
+.chip.error { border-color: var(--danger); color: var(--danger); padding-left: 8px; }
+.msg-media { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; margin-top: 8px; }
+.msg-media .chip-file { padding: 4px 6px; }
+.msg-media:first-child { margin-top: 0; }
+.msg-media img { max-width: 160px; max-height: 120px; border-radius: 6px; display: block; }
+.msg-media .chip { background: rgb(255 255 255 / .15); border-color: rgb(255 255 255 / .3); color: inherit; }
 
 /* ---------- panes */
 #resizer { flex: none; width: 6px; cursor: col-resize; background: var(--border); }

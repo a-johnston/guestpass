@@ -5,6 +5,9 @@ import { createFrame, removeFrame, getFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
 import { sessionToMarkdown, formatDuration, formatSeconds } from './session.js';
+import { prepareHistory, mergeContent, userContent } from './content.js';
+import { pickImageMime, canEncodeWebp } from './media.js';
+import { createAttachmentTray, mediaRow } from './attachments.js';
 
 const MAX_TOOL_ROUNDS = 25; // granular tools (edit/read) take more rounds; Continue resumes past it
 
@@ -29,6 +32,7 @@ const state = {
   sendReasoning: true, // reasoning_content on assistant messages (see thinkingMode)
   thinkingMode: 'all', // 'turn': current turn only; 'all': every turn (options popover)
   requestUsage: true, // stream_options.include_usage, for the context counter
+  toolImages: true, // images inside tool results; off: sent in a user message after them
   // From /models and /props at connect. vision: null = not reported (tried until rejected).
   caps: { vision: null, documents: false, basalt: false },
   context: { used: null, max: null },
@@ -39,7 +43,7 @@ const state = {
   stream: null, // AbortController of the in-flight completion request
   stopRequested: false, // Stop: end the run
   interrupt: false, // Send now: end the current stream, then continue with the queue
-  /** Messages typed during a run; delivered at the next model call. @type {{text:string, el:HTMLElement}[]} */
+  /** Messages typed during a run; delivered at the next model call. @type {{text:string, parts:object[], el:HTMLElement}[]} */
   queue: [],
   /** Inline widgets by id, so re-rendering an id replaces the old one. @type {Map<string, {card:HTMLElement, chip:{note:Function}|null}>} */
   inline: new Map(),
@@ -300,9 +304,23 @@ function updatePlaceholder() {
   el.prompt.placeholder = state.busy ? BUSY_PLACEHOLDER : state.conn === 'pending' ? CONNECTING_PLACEHOLDER : IDLE_PLACEHOLDER;
 }
 
+/** The format images are encoded in before sending: WebP for basalt where the browser can, else JPEG. */
+const imageMime = () => pickImageMime({ basalt: state.caps.basalt, canWebp: canEncodeWebp() });
+
+let tray = null;
+let submitting = false; // waiting for attachments still being compressed
+
 function wireComposer() {
   const form = $('composer');
   updatePlaceholder();
+  tray = createAttachmentTray({
+    tray: $('attachments'),
+    input: $('attach-input'),
+    button: $('attach-btn'),
+    dropTarget: $('chat-col'),
+    pasteTarget: el.prompt,
+    getOptions: () => ({ caps: state.caps, mime: imageMime() }),
+  });
   el.prompt.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -313,17 +331,26 @@ function wireComposer() {
   });
   el.prompt.addEventListener('input', autosize);
   el.stop.addEventListener('click', stop);
-  form.addEventListener('submit', (e) => {
+  form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (submitting) return;
     const text = el.prompt.value.trim();
-    if (!text) return;
+    if (!text && !tray.count && !tray.pending) return;
+    submitting = true;
+    try {
+      await tray.ready(); // an image still compressing goes with this message
+    } finally {
+      submitting = false;
+    }
+    const parts = tray.take();
+    if (!text && !parts.length) return; // everything still pending failed to attach
     el.prompt.value = '';
     autosize();
     following = true; // sending is a clear "take me to the latest"
     if (state.busy || state.conn === 'pending') {
-      enqueue(text); // during a run: steering; while connecting: sent once the model is known
+      enqueue(text, parts); // during a run: steering; while connecting: sent once the model is known
     } else {
-      pushUser(text);
+      pushUser(text, parts);
       runTurn();
     }
   });
@@ -363,8 +390,8 @@ function stop() {
   state.stream?.abort();
 }
 
-function enqueue(text) {
-  const item = { text, el: h('div', 'queued') };
+function enqueue(text, parts = []) {
+  const item = { text, parts, el: h('div', 'queued') };
   const now = h('button', 'ghost small', 'Send now');
   now.type = 'button';
   now.title = 'Interrupt the current response and send queued messages';
@@ -382,7 +409,9 @@ function enqueue(text) {
     item.el.remove();
     el.queue.hidden = state.queue.length === 0;
   });
-  item.el.append(h('span', 'queued-label', 'Queued'), h('div', 'queued-text', text), now, del);
+  item.el.append(h('span', 'queued-label', 'Queued'), h('div', 'queued-text', text));
+  if (parts.length) item.el.append(h('span', 'queued-count', `+${parts.length} attachment${parts.length === 1 ? '' : 's'}`));
+  item.el.append(now, del);
   state.queue.push(item);
   el.queue.append(item.el);
   el.queue.hidden = false;
@@ -392,15 +421,16 @@ function takeQueue() {
   const items = state.queue.splice(0);
   items.forEach((i) => i.el.remove());
   el.queue.hidden = true;
-  return items.map((i) => i.text);
+  return items.map(({ text, parts }) => ({ text, parts }));
 }
 
 /** Adds a user message; consecutive user messages are merged in the API history (some chat templates require alternation). */
-function pushUser(text) {
-  addUserMessage(text);
+function pushUser(text, parts = []) {
+  addUserMessage(text, parts);
+  const content = userContent(text, parts);
   const last = state.messages.at(-1);
-  if (last?.role === 'user') last.content += `\n\n${text}`;
-  else state.messages.push({ role: 'user', content: text });
+  if (last?.role === 'user') last.content = mergeContent(last.content, content);
+  else state.messages.push({ role: 'user', content });
 }
 
 // ---------------------------------------------------------------- conversation
@@ -424,11 +454,31 @@ function buildRequest() {
       .map((m) => (m.tool_calls ? { role: m.role, content: m.content } : m))
       .filter((m) => m.role !== 'assistant' || m.content);
   }
+  // Media: drops older screenshots, applies capability fallbacks, strips local metadata.
+  history = prepareHistory(history, {
+    vision: state.caps.vision,
+    documents: state.caps.documents,
+    toolImages: state.toolImages,
+    clearedBefore: 0,
+  });
   const body = { messages: system ? [{ role: 'system', content: system }, ...history] : history };
   if (state.cfg.model) body.model = state.cfg.model;
   if (toolsOn) body.tools = TOOL_DEFS;
   if (state.requestUsage) body.stream_options = { include_usage: true };
-  return body;
+  return { body, used: mediaUsed(history) };
+}
+
+/** Which kinds of media a request carries, so a rejection can be pinned on the right one. */
+function mediaUsed(history) {
+  const used = { images: false, toolImages: false, files: false };
+  for (const m of history) {
+    if (!Array.isArray(m.content)) continue;
+    for (const p of m.content) {
+      if (p.type === 'image_url') { used.images = true; if (m.role === 'tool') used.toolImages = true; }
+      if (p.type === 'file') used.files = true;
+    }
+  }
+  return used;
 }
 
 /**
@@ -456,17 +506,24 @@ function markSuperseded(id, latest) {
 
 /**
  * Optional request features the server may reject. If a request fails with an error mentioning
- * one that's still on, it's switched off for the session and the request retried without it.
+ * one that's still on (and, with `when`, that the request actually carried), it's switched off for
+ * the session and the request retried without it. `caps` entries switch off state.caps[key].
+ * Media come first: their errors often mention "tool" or "content" too.
  */
 const FALLBACKS = [
+  { key: 'toolImages', when: (u) => u.toolImages, match: /image|content|multimodal|array/i },
+  { key: 'documents', caps: true, when: (u) => u.files, match: /file|document|content|type/i, notice: 'This server can’t read attached files, so text files are sent inline and other files are skipped.' },
+  { key: 'vision', caps: true, when: (u) => u.images, match: /image|vision|multimodal|mmproj/i, notice: 'This model doesn’t accept images, so images and screenshots are off for this session.' },
   { key: 'toolsSupported', match: /tool|jinja|function.?call/i, notice: 'This server doesn’t accept tool calls, so widgets and panes are off for this session.' },
   { key: 'sendReasoning', match: /reasoning/i },
   { key: 'requestUsage', match: /stream_options|include_usage/i },
 ];
 
-function fallbackFor(err) {
+const fallbackOn = (f) => (f.caps ? state.caps[f.key] !== false : state[f.key]);
+
+function fallbackFor(err, used) {
   if (!(err.status >= 400 && err.status < 600)) return null;
-  return FALLBACKS.find((f) => state[f.key] && f.match.test(err.message)) || null;
+  return FALLBACKS.find((f) => fallbackOn(f) && (!f.when || f.when(used)) && f.match.test(err.message)) || null;
 }
 
 /** Attaches a reply's thinking (text + duration) for the transcript; buildRequest strips it. */
@@ -490,7 +547,7 @@ async function runTurn() {
     for (;;) {
       const queued = takeQueue();
       if (queued.length) {
-        queued.forEach(pushUser);
+        queued.forEach((q) => pushUser(q.text, q.parts));
         rounds = 0;
       }
       if (rounds++ >= MAX_TOOL_ROUNDS) {
@@ -514,11 +571,12 @@ async function runTurn() {
       let result;
       const started = performance.now();
       let firstToken = 0; // first real output (role-only / empty chunks don't count)
+      const { body, used } = buildRequest();
       try {
         result = await streamChat({
           baseUrl: state.cfg.baseUrl,
           apiKey: state.cfg.apiKey,
-          body: buildRequest(),
+          body,
           signal: ctrl.signal,
           onUpdate: (p) => {
             if (!firstToken && (p.content || p.reasoning || p.toolCalls.length)) firstToken = performance.now();
@@ -538,9 +596,10 @@ async function runTurn() {
           if (state.interrupt && !state.stopRequested) continue;
           return;
         }
-        const fallback = fallbackFor(e);
+        const fallback = fallbackFor(e, used);
         if (fallback) {
-          state[fallback.key] = false;
+          if (fallback.caps) state.caps[fallback.key] = false;
+          else state[fallback.key] = false;
           view.remove();
           if (fallback.notice) notice(fallback.notice, 'warn');
           rounds--;
@@ -600,7 +659,9 @@ async function runTurn() {
     updateContext(); // drop any live estimate left by an interrupted or failed stream
     if (state.stopRequested && state.queue.length) {
       // Stop means stop: hand queued text back for editing instead of sending it.
-      el.prompt.value = [...takeQueue(), el.prompt.value].filter(Boolean).join('\n\n');
+      const queued = takeQueue();
+      el.prompt.value = [...queued.map((q) => q.text), el.prompt.value].filter(Boolean).join('\n\n');
+      tray.restore(queued.flatMap((q) => q.parts));
       autosize();
     }
     setBusy(false);
@@ -684,8 +745,10 @@ function h(tag, className, text) {
   return n;
 }
 
-function addUserMessage(text) {
-  append(h('div', 'msg user', text));
+function addUserMessage(text, parts = []) {
+  const msg = h('div', 'msg user', text || null);
+  if (parts.length) msg.append(mediaRow(parts));
+  append(msg);
 }
 
 function notice(text, kind = 'info') {

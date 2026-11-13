@@ -8,7 +8,7 @@ Model-authored HTML runs in `<iframe sandbox="allow-scripts …">` without `allo
 
 ```sh
 python3 -m http.server 8080
-python3 dev/mock_server.py --key sk-test # fake API at http://localhost:8099/v1 (--no-tools / --no-reasoning simulate servers rejecting those)
+python3 dev/mock_server.py --key sk-test # fake API at http://localhost:8099/v1 (--no-tools / --no-reasoning / --no-vision / --no-documents / --no-tool-images simulate servers rejecting those)
 node --test test/
 ```
 

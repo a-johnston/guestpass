@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeContent, contentText, prepareHistory, fence } from '../js/content.js';
+import { mergeContent, contentText, prepareHistory, fence, userContent } from '../js/content.js';
 
 const URL = 'data:image/webp;base64,AAAA';
 const img = (name, extra = {}) => ({ type: 'image_url', image_url: { url: URL }, meta: { kind: 'attachment', name, bytes: 27, mime: 'image/webp', ...extra } });
@@ -14,6 +14,12 @@ test('mergeContent joins strings and promotes to parts', () => {
   assert.equal(mergeContent('a', 'b'), 'a\n\nb');
   assert.deepEqual(mergeContent('a', [img('x.png')]), [{ type: 'text', text: 'a' }, img('x.png')]);
   assert.deepEqual(mergeContent([img('x.png')], 'b'), [img('x.png'), { type: 'text', text: 'b' }]);
+});
+
+test('userContent: text alone stays a string; attachments make parts', () => {
+  assert.equal(userContent('hi'), 'hi');
+  assert.deepEqual(userContent('hi', [img('x.png')]), [{ type: 'text', text: 'hi' }, img('x.png')]);
+  assert.deepEqual(userContent('', [img('x.png')]), [img('x.png')]);
 });
 
 test('contentText with placeholders', () => {

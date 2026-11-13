@@ -7,6 +7,7 @@
 --no-reasoning rejects requests whose messages carry `reasoning_content`.
 --no-vision reports a text-only model and rejects image parts; --no-documents rejects `file` parts;
 --no-tool-images rejects images inside tool messages (as many servers do).
+--no-caps reports no modalities and serves no /props (a barebones server: capabilities unknown).
 /props reports vision, n_ctx, and basalt's `documents` capability, like basalt 0.3.3.
 --models-delay / --models-status slow down or fail /models (for the connecting state).
 /models reports mock-1 with meta.n_ctx 8192; with stream_options.include_usage, a rough token
@@ -50,6 +51,29 @@ INLINE_HTML = """<svg viewBox="0 0 200 60" width="100%" height="60"><rect width=
 <script>console.log('inline widget loaded at', new Date().toISOString())</script>"""
 
 
+def part_types(msg):
+    """The content-part types in a message (empty for plain string content)."""
+    content = msg.get("content")
+    return {p.get("type") for p in content} if isinstance(content, list) else set()
+
+
+def text_of(content):
+    """A message's text: the string, or its text parts joined like the client joins them."""
+    if isinstance(content, list):
+        return "\n\n".join(p.get("text", "") for p in content if p.get("type") == "text")
+    return content or ""
+
+
+def media_note(msg):
+    """'Received: 2 image(s), 1 file(s)' for a message with media, else ''."""
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return ""
+    images = sum(p.get("type") == "image_url" for p in content)
+    files = sum(p.get("type") == "file" for p in content)
+    return f"Received: {images} image(s), {files} file(s)" if images or files else ""
+
+
 def chunk(delta, finish=None):
     return {"id": "mock", "object": "chat.completion.chunk", "model": "mock-1",
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
@@ -62,6 +86,7 @@ class Handler(BaseHTTPRequestHandler):
     no_vision = False
     no_documents = False
     no_tool_images = False
+    no_caps = False
     models_delay = 0.0
     models_status = 200
     usage = None
@@ -97,10 +122,10 @@ class Handler(BaseHTTPRequestHandler):
         time.sleep(self.models_delay)
         if self.models_status != 200:
             return self.reject(self.models_status, "model list unavailable (--models-status)")
-        modalities = ["text"] if self.no_vision else ["text", "image"]
-        body = json.dumps({"object": "list", "data": [
-            {"id": "mock-1", "meta": {"n_ctx": 8192}, "architecture": {"input_modalities": modalities}},
-            {"id": "mock-2"}]}).encode()
+        mock1 = {"id": "mock-1", "meta": {"n_ctx": 8192}}
+        if not self.no_caps:
+            mock1["architecture"] = {"input_modalities": ["text"] if self.no_vision else ["text", "image"]}
+        body = json.dumps({"object": "list", "data": [mock1, {"id": "mock-2"}]}).encode()
         self.send_response(200)
         self.cors()
         self.send_header("Content-Type", "application/json")
@@ -110,6 +135,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def props(self):
         """llama.cpp's /props at the server root, with basalt's extra key (as basalt 0.3.3 reports it)."""
+        if self.no_caps:
+            return self.send_error(404)
         if not self.authorized():
             return
         body = json.dumps({
@@ -136,6 +163,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.reject(500, "tools param requires --jinja flag")
         if self.no_reasoning and any("reasoning_content" in m for m in msgs):
             return self.reject(400, "unsupported field: reasoning_content")
+        if self.no_tool_images and any(m.get("role") == "tool" and part_types(m) & {"image_url"} for m in msgs):
+            return self.reject(400, "tool message content must be a string")
+        if self.no_vision and any(part_types(m) & {"image_url"} for m in msgs):
+            return self.reject(400, "image input is not supported by this model")
+        if self.no_documents and any(part_types(m) & {"file"} for m in msgs):
+            return self.reject(400, "unsupported content part type: file")
         # Rough token count (4 chars/token) so the client's context counter has numbers to show.
         self.usage = None
         if (req.get("stream_options") or {}).get("include_usage"):
@@ -186,7 +219,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def respond(self, msgs, has_tools):
         last = msgs[-1] if msgs else {}
-        user = next((m.get("content") or "" for m in reversed(msgs) if m.get("role") == "user"), "")
+        user_msg = next((m for m in reversed(msgs) if m.get("role") == "user"), {})
+        user = text_of(user_msg.get("content"))
+        received = media_note(user_msg)
         key = user.split("\n\n")[-1]  # the client merges queued messages into one user turn
         if last.get("role") == "tool" and has_tools and key.startswith("call:") and json.loads(key[5:]).get("loop"):
             self.tool_call("kv", {})  # never satisfied: keeps calling tools until the client's round limit
@@ -224,7 +259,8 @@ class Handler(BaseHTTPRequestHandler):
             if "think" in key.lower():
                 self.stream_text("Let me consider this carefully... ok.", field="reasoning_content")
             self.stream_text(
-                f"You said: **{user}**\n\n| tools sent | messages |\n|---|---|\n| {has_tools} | {len(msgs)} |\n\n"
+                f"You said: **{user}**\n\n" + (f"{received}\n\n" if received else "") +
+                f"| tools sent | messages |\n|---|---|\n| {has_tools} | {len(msgs)} |\n\n"
                 "Here is a runnable block:\n\n```html\n<button onclick=\"this.textContent='clicked!'\">Click me</button>\n```\n")
         self.emit(chunk({}, "stop"))
         self.end_stream()
@@ -249,6 +285,7 @@ if __name__ == "__main__":
     ap.add_argument("--no-vision", action="store_true", help="report and act like a text-only model")
     ap.add_argument("--no-documents", action="store_true", help="reject file content parts")
     ap.add_argument("--no-tool-images", action="store_true", help="reject images inside tool messages")
+    ap.add_argument("--no-caps", action="store_true", help="report no modalities and no /props, like a barebones server")
     ap.add_argument("--models-delay", type=float, default=0.0, help="seconds before /models answers")
     ap.add_argument("--models-status", type=int, default=200, help="make /models fail with this status")
     a = ap.parse_args()
@@ -258,6 +295,7 @@ if __name__ == "__main__":
     Handler.no_vision = a.no_vision
     Handler.no_documents = a.no_documents
     Handler.no_tool_images = a.no_tool_images
+    Handler.no_caps = a.no_caps
     Handler.models_delay = a.models_delay
     Handler.models_status = a.models_status
     print(f"mock server on http://localhost:{a.port}/v1" + (f" (key: {a.key})" if a.key else ""))
