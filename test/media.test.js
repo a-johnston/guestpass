@@ -40,6 +40,14 @@ test('classifyFile', () => {
   assert.deepEqual(classifyFile({ name: 'notes.md', type: 'text/markdown', size: 9 }, caps), { kind: 'text' });
 });
 
+test('classifyFile rejects oversized would-be text files by size, before anything is read', () => {
+  const huge = { name: 'disk.iso', type: 'application/x-iso9660-image', size: 4 * 1024 ** 3 };
+  assert.deepEqual(classifyFile(huge, { vision: true, documents: true }), { error: "Files over 10 MB aren't supported." });
+  assert.deepEqual(classifyFile({ name: 'log.txt', type: 'text/plain', size: 200 * 1024 }, { vision: true, documents: false }),
+    { error: "Text files over 100 KB can't be attached to this server." });
+  assert.deepEqual(classifyFile({ name: 'log.txt', type: 'text/plain', size: 200 * 1024 }, { vision: true, documents: true }), { kind: 'text' });
+});
+
 test('looksLikeText', () => {
   assert.equal(looksLikeText(new TextEncoder().encode('héllo')), true);
   assert.equal(looksLikeText(new Uint8Array([0x68, 0x00, 0x69])), false);

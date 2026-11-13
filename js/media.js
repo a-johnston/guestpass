@@ -41,6 +41,9 @@ export function classifyFile({ name = '', type = '', size = 0 }, { vision = null
     if (!documents) return { error: "This server can't read PDF or Office files." };
     return size > MAX_DOCUMENT_BYTES ? { error: "Files over 10 MB aren't supported." } : { kind: 'document' };
   }
+  // Checked here, before the caller reads the bytes: a stray multi-GB drop must not be loaded.
+  if (documents && size > MAX_DOCUMENT_BYTES) return { error: "Files over 10 MB aren't supported." };
+  if (!documents && size > MAX_INLINE_TEXT_BYTES) return { error: "Text files over 100 KB can't be attached to this server." };
   return { kind: 'text' };
 }
 

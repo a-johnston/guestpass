@@ -58,10 +58,11 @@ export function createAttachmentTray({ tray, input, button, dropTarget, pasteTar
   });
   input.addEventListener('change', () => { addAll(input.files); input.value = ''; });
 
-  // Pasted files (e.g. a screenshot) attach; pasted text pastes as usual.
+  // Pasted files (e.g. a screenshot) attach; pasted text pastes as usual. Spreadsheets and office
+  // apps put an image of the selection next to its text: the text wins.
   pasteTarget.addEventListener('paste', (e) => {
     const files = e.clipboardData?.files;
-    if (!files?.length) return;
+    if (!files?.length || e.clipboardData.getData('text/plain')) return;
     e.preventDefault();
     addAll(files);
   });

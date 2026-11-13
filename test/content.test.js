@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeContent, contentText, prepareHistory, fence, userContent, clearableSummary } from '../js/content.js';
+import { mergeContent, contentText, prepareHistory, fence, userContent, clearableSummary, markCleared } from '../js/content.js';
 
 const URL = 'data:image/webp;base64,AAAA';
 const img = (name, extra = {}) => ({ type: 'image_url', image_url: { url: URL }, meta: { kind: 'attachment', name, bytes: 27, mime: 'image/webp', ...extra } });
 const shot = (pageId) => ({ type: 'image_url', image_url: { url: URL }, meta: { kind: 'screenshot', name: 'shot', pageId, bytes: 27, mime: 'image/webp' } });
 const sent = (url = URL) => ({ type: 'image_url', image_url: { url } }); // what the server receives
 const file = (name, extra = {}) => ({ type: 'file', file: { filename: name, file_data: 'data:text/plain;base64,YQ==' }, meta: { kind: 'attachment', name, bytes: 28, mime: 'text/plain', ...extra } });
-const ON = { vision: true, documents: true, toolImages: true, clearedBefore: 0 };
+const ON = { vision: true, documents: true, toolImages: true };
 const call = (id) => ({ id, type: 'function', function: { name: 'screenshot', arguments: '{}' } });
 
 test('mergeContent joins strings and promotes to parts', () => {
@@ -53,15 +53,33 @@ test('only the latest screenshot per page is sent', () => {
   assert.deepEqual(out[3].content, [{ type: 'text', text: 'three' }, sent()]);
 });
 
-test('clearedBefore replaces media before the watermark', () => {
+test('cleared media becomes placeholders', () => {
   const msgs = [
     { role: 'user', content: [{ type: 'text', text: 'look' }, img('x.png')] },
     { role: 'assistant', content: 'ok' },
-    { role: 'user', content: [{ type: 'text', text: 'and' }, img('y.png')] },
   ];
-  const out = prepareHistory(msgs, { ...ON, clearedBefore: 2 });
+  markCleared(msgs, new Set(['inline', 'pane']));
+  msgs.push({ role: 'user', content: [{ type: 'text', text: 'and' }, img('y.png')] });
+  const out = prepareHistory(msgs, ON);
   assert.equal(out[0].content, 'look\n\n[image: x.png — cleared from history]');
   assert.deepEqual(out[2].content, [{ type: 'text', text: 'and' }, sent()]);
+});
+
+test('an attachment merged into a cleared message is still sent', () => {
+  // A turn that failed before any reply leaves the user message last; the next send merges into it.
+  const msgs = [{ role: 'user', content: [{ type: 'text', text: 'look' }, img('x.png')] }];
+  markCleared(msgs, new Set(['inline', 'pane']));
+  msgs[0].content = mergeContent(msgs[0].content, [img('y.png')]);
+  assert.deepEqual(prepareHistory(msgs, ON)[0].content,
+    [{ type: 'text', text: 'look' }, { type: 'text', text: '[image: x.png — cleared from history]' }, sent()]);
+  assert.equal(clearableSummary(msgs, { renderTools: new Set(), charsPerToken: 4 }).items, 1, 'the new image counts as clearable');
+});
+
+test('markCleared marks page renders but not other tool calls', () => {
+  const render = { id: 'r', type: 'function', function: { name: 'inline', arguments: '{"html":"<p>x</p>"}' } };
+  const msgs = [{ role: 'assistant', content: '', tool_calls: [render, call('s')] }];
+  markCleared(msgs, new Set(['inline', 'pane']));
+  assert.deepEqual([msgs[0].tool_calls[0].cleared, msgs[0].tool_calls[1].cleared], [true, undefined]);
 });
 
 test('vision off replaces images', () => {
@@ -130,23 +148,24 @@ const summaryMsgs = () => [
 ];
 
 test('clearableSummary counts sendable media and live page HTML', () => {
-  const s = clearableSummary(summaryMsgs(), { clearedBefore: 0, renderTools: RENDER, charsPerToken: 4 });
+  const s = clearableSummary(summaryMsgs(), { renderTools: RENDER, charsPerToken: 4 });
   assert.deepEqual(s, { bytes: 30000 + 4000 + 21000, tokens: 475 + 1000 + 768, items: 3 });
 });
 
 test('clearableSummary skips superseded page HTML', () => {
   const msgs = summaryMsgs();
   msgs[1].tool_calls[0].superseded = true;
-  const s = clearableSummary(msgs, { clearedBefore: 0, renderTools: RENDER, charsPerToken: 4 });
+  const s = clearableSummary(msgs, { renderTools: RENDER, charsPerToken: 4 });
   assert.deepEqual(s, { bytes: 30000 + 21000, tokens: 475 + 768, items: 2 });
 });
 
 test('clearableSummary counts text files by their text', () => {
   const msgs = [{ role: 'user', content: [file('a.py', { bytes: 500, text: 'x'.repeat(400) }), file('b.pdf', { bytes: 9000, mime: 'application/pdf' })] }];
-  assert.deepEqual(clearableSummary(msgs, { clearedBefore: 0, renderTools: RENDER, charsPerToken: 4 }), { bytes: 9500, tokens: 100, items: 2 });
+  assert.deepEqual(clearableSummary(msgs, { renderTools: RENDER, charsPerToken: 4 }), { bytes: 9500, tokens: 100, items: 2 });
 });
 
-test('nothing before the watermark counts', () => {
+test('nothing already cleared counts', () => {
   const msgs = summaryMsgs();
-  assert.deepEqual(clearableSummary(msgs, { clearedBefore: msgs.length, renderTools: RENDER, charsPerToken: 4 }), { bytes: 0, tokens: 0, items: 0 });
+  markCleared(msgs, RENDER);
+  assert.deepEqual(clearableSummary(msgs, { renderTools: RENDER, charsPerToken: 4 }), { bytes: 0, tokens: 0, items: 0 });
 });

@@ -238,7 +238,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 /* ---------- attachments: the tray above the composer, and the row inside a sent message */
 .attach-btn { height: 44px; width: 44px; padding: 0; border-radius: 12px; font-size: 22px; line-height: 1; color: var(--muted); flex: none; }
 .attach-btn:hover { color: var(--text); }
-#chat-col.dropping #composer .prompt-wrap textarea { border-color: var(--accent); }
+body.dropping #prompt { border-color: var(--accent); }
 .attachments { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; max-width: 892px; margin: 0 auto; padding: 6px 16px 0; }
 .chip {
   display: flex; align-items: center; gap: 6px; max-width: 260px; padding: 3px 4px 3px 3px; font-size: 12px;

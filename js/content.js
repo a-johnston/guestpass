@@ -45,24 +45,43 @@ export function contentText(content, { placeholders = false } = {}) {
 }
 
 /**
+ * "Clear media": marks every image and file part (meta.cleared) and every page render
+ * (call.cleared) in the history so far. Marks rather than an index, so a later attachment merged
+ * into an already-cleared user message is still sent.
+ */
+export function markCleared(messages, renderTools) {
+  for (const m of messages) {
+    if (Array.isArray(m.content)) {
+      for (const p of m.content) if (isMedia(p)) p.meta = { ...p.meta, cleared: true };
+    }
+    for (const c of m.tool_calls || []) if (renderTools.has(c.function?.name)) c.cleared = true;
+  }
+}
+
+/** The latest screenshot part of each page that is still sent; earlier ones are dropped. */
+function latestShots(messages) {
+  const last = new Map();
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const p of m.content) if (p.meta?.kind === 'screenshot' && !p.meta.cleared) last.set(p.meta.pageId, p);
+  }
+  return last;
+}
+
+/**
  * The history as it should be sent this request. Never mutates `messages`.
- *   clearedBefore: messages before this index have their media replaced by placeholders
+ *   cleared parts (markCleared) become placeholders
  *   vision: false replaces images (null = unknown, sent anyway)
  *   documents: false inlines text files as fenced blocks and drops other files
  *   toolImages: false moves images out of tool results into a user message after them
  */
-export function prepareHistory(messages, { vision = null, documents = true, toolImages = true, clearedBefore = 0 } = {}) {
-  const lastShot = new Map(); // pageId -> the screenshot part that is still sent
-  messages.forEach((m, i) => {
-    if (i < clearedBefore || !Array.isArray(m.content)) return;
-    for (const p of m.content) if (p.meta?.kind === 'screenshot') lastShot.set(p.meta.pageId, p);
-  });
-
-  const shaped = messages.map((m, i) => {
+export function prepareHistory(messages, { vision = null, documents = true, toolImages = true } = {}) {
+  const lastShot = latestShots(messages);
+  const shaped = messages.map((m) => {
     if (!Array.isArray(m.content)) return { ...m };
     const content = m.content.map((p) => {
       if (!isMedia(p)) return p;
-      if (i < clearedBefore) return textPart(`[${mediaLabel(p)} — cleared from history]`);
+      if (p.meta?.cleared) return textPart(`[${mediaLabel(p)} — cleared from history]`);
       if (p.meta?.kind === 'screenshot' && lastShot.get(p.meta.pageId) !== p) {
         return textPart(`[earlier screenshot of "${p.meta.pageId}" omitted; a newer one follows]`);
       }
@@ -108,30 +127,25 @@ function moveToolImages(messages) {
 }
 
 /**
- * What "Clear media" would stop re-sending: images and files still sent (not before the
- * watermark, not an older screenshot of the same page) and page HTML not already stubbed.
+ * What "Clear media" would stop re-sending: images and files still sent (not cleared, not an
+ * older screenshot of the same page) and page HTML not already stubbed.
  * bytes are wire size; tokens are estimates (images by basalt's 32 px tiles, text by chars).
  */
-export function clearableSummary(messages, { clearedBefore = 0, renderTools, charsPerToken = 4 }) {
-  const lastShot = new Map();
-  messages.forEach((m, i) => {
-    if (i < clearedBefore || !Array.isArray(m.content)) return;
-    for (const p of m.content) if (p.meta?.kind === 'screenshot') lastShot.set(p.meta.pageId, p);
-  });
+export function clearableSummary(messages, { renderTools, charsPerToken = 4 }) {
+  const lastShot = latestShots(messages);
   let bytes = 0;
   let tokens = 0;
   let items = 0;
-  messages.forEach((m, i) => {
-    if (i < clearedBefore) return;
+  messages.forEach((m) => {
     for (const p of Array.isArray(m.content) ? m.content : []) {
-      if (!isMedia(p) || (p.meta?.kind === 'screenshot' && lastShot.get(p.meta.pageId) !== p)) continue;
+      if (!isMedia(p) || p.meta?.cleared || (p.meta?.kind === 'screenshot' && lastShot.get(p.meta.pageId) !== p)) continue;
       items++;
       bytes += p.meta?.bytes ?? 0;
       if (p.type === 'image_url' && p.meta?.width) tokens += imageTokens(p.meta.width, p.meta.height);
       if (p.type === 'file' && typeof p.meta?.text === 'string') tokens += Math.round(p.meta.text.length / charsPerToken);
     }
     for (const c of m.tool_calls || []) {
-      if (c.superseded || !renderTools.has(c.function?.name)) continue;
+      if (c.superseded || c.cleared || !renderTools.has(c.function?.name)) continue;
       let html;
       try { html = JSON.parse(c.function.arguments).html; } catch { continue; }
       if (typeof html !== 'string' || !html) continue;

@@ -5,9 +5,10 @@ import { createFrame, removeFrame, getFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
 import { sessionToMarkdown, formatDuration, formatSeconds } from './session.js';
-import { prepareHistory, mergeContent, userContent, clearableSummary } from './content.js';
+import { prepareHistory, mergeContent, userContent, clearableSummary, markCleared } from './content.js';
 import { pickImageMime, canEncodeWebp, formatBytes } from './media.js';
 import { createAttachmentTray, mediaRow } from './attachments.js';
+import { fallbackFor } from './fallbacks.js';
 
 const MAX_TOOL_ROUNDS = 25; // granular tools (edit/read) take more rounds; Continue resumes past it
 
@@ -33,7 +34,6 @@ const state = {
   thinkingMode: 'all', // 'turn': current turn only; 'all': every turn (options popover)
   requestUsage: true, // stream_options.include_usage, for the context counter
   toolImages: true, // images inside tool results; off: sent in a user message after them
-  clearedBefore: 0, // "Clear media": messages before this index go out without their media and page HTML
   // From /models and /props at connect. vision: null = not reported (tried until rejected).
   caps: { vision: null, documents: false, basalt: false },
   context: { used: null, max: null },
@@ -321,7 +321,8 @@ function wireComposer() {
     tray: $('attachments'),
     input: $('attach-input'),
     button: $('attach-btn'),
-    dropTarget: $('chat-col'),
+    // The whole page: a file dropped beside the chat would otherwise open in the tab and lose it.
+    dropTarget: document.body,
     pasteTarget: el.prompt,
     getOptions: () => ({ caps: state.caps, mime: imageMime() }),
   });
@@ -448,7 +449,7 @@ function buildRequest() {
   // tool loop; earlier turns' thinking is dropped, the usual practice for reasoning models.
   const lastUser = state.messages.findLastIndex((m) => m.role === 'user');
   let history = state.messages.map(({ reasoning, thinkingMs, ...m }, i) => {
-    if (m.tool_calls) m.tool_calls = m.tool_calls.map((c) => forServer(c, i < state.clearedBefore));
+    if (m.tool_calls) m.tool_calls = m.tool_calls.map(forServer);
     if (reasoning && state.sendReasoning && (state.thinkingMode === 'all' || i > lastUser)) m.reasoning_content = reasoning;
     return m;
   });
@@ -464,7 +465,6 @@ function buildRequest() {
     vision: state.caps.vision,
     documents: state.caps.documents,
     toolImages: state.toolImages,
-    clearedBefore: state.clearedBefore,
   });
   const body = { messages: system ? [{ role: 'system', content: system }, ...history] : history };
   if (state.cfg.model) body.model = state.cfg.model;
@@ -492,8 +492,8 @@ function mediaUsed(history) {
  * by far the largest thing in a widget-heavy history. "Clear media" (`cleared`) stubs it too.
  * The local copy (and session.md) keep it all.
  */
-function forServer({ superseded, ...call }, cleared = false) {
-  if (!superseded && !(cleared && RENDER_TOOLS.has(call.function?.name))) return call;
+function forServer({ superseded, cleared, ...call }) {
+  if (!superseded && !cleared) return call;
   let args;
   try { args = JSON.parse(call.function.arguments); } catch { return call; }
   if (typeof args.html !== 'string') return call;
@@ -503,15 +503,13 @@ function forServer({ superseded, ...call }, cleared = false) {
 
 /** The "Clear media" button by the context counter: shown while anything re-sent could be dropped. */
 function updateClearMedia() {
-  const { bytes, tokens } = clearableSummary(state.messages, {
-    clearedBefore: state.clearedBefore, renderTools: RENDER_TOOLS, charsPerToken: state.charsPerToken,
-  });
+  const { bytes, tokens } = clearableSummary(state.messages, { renderTools: RENDER_TOOLS, charsPerToken: state.charsPerToken });
   el.clearMedia.hidden = bytes === 0;
   el.clearMedia.textContent = `Clear media · ${formatBytes(bytes)}${tokens ? ` · ~${formatTokens(tokens)} tok` : ''}`;
 }
 
 function clearMedia() {
-  state.clearedBefore = state.messages.length;
+  markCleared(state.messages, RENDER_TOOLS);
   updateClearMedia();
   notice('Cleared media from what is sent to the model. The chat still shows it.');
 }
@@ -526,27 +524,8 @@ function markSuperseded(id, latest) {
   }
 }
 
-/**
- * Optional request features the server may reject. If a request fails with an error mentioning
- * one that's still on (and, with `when`, that the request actually carried), it's switched off for
- * the session and the request retried without it. `caps` entries switch off state.caps[key].
- * Media come first: their errors often mention "tool" or "content" too.
- */
-const FALLBACKS = [
-  { key: 'toolImages', when: (u) => u.toolImages, match: /image|content|multimodal|array/i },
-  { key: 'documents', caps: true, when: (u) => u.files, match: /file|document|content|type/i, notice: 'This server can’t read attached files, so text files are sent inline and other files are skipped.' },
-  { key: 'vision', caps: true, when: (u) => u.images, match: /image|vision|multimodal|mmproj/i, notice: 'This model doesn’t accept images, so images and screenshots are off for this session.' },
-  { key: 'toolsSupported', match: /tool|jinja|function.?call/i, notice: 'This server doesn’t accept tool calls, so widgets and panes are off for this session.' },
-  { key: 'sendReasoning', match: /reasoning/i },
-  { key: 'requestUsage', match: /stream_options|include_usage/i },
-];
-
+/** Whether a request feature (see fallbacks.js) is still on for this session. */
 const fallbackOn = (f) => (f.caps ? state.caps[f.key] !== false : state[f.key]);
-
-function fallbackFor(err, used) {
-  if (!(err.status >= 400 && err.status < 600)) return null;
-  return FALLBACKS.find((f) => fallbackOn(f) && (!f.when || f.when(used)) && f.match.test(err.message)) || null;
-}
 
 /** Attaches a reply's thinking (text + duration) for the transcript; buildRequest strips it. */
 function withThinking(msg, reasoning, view) {
@@ -618,7 +597,7 @@ async function runTurn() {
           if (state.interrupt && !state.stopRequested) continue;
           return;
         }
-        const fallback = fallbackFor(e, used);
+        const fallback = fallbackFor(e, used, fallbackOn);
         if (fallback) {
           if (fallback.caps) state.caps[fallback.key] = false;
           else state[fallback.key] = false;

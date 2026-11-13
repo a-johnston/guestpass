@@ -228,7 +228,11 @@ export async function runTool(name, rawArgs, ui) {
       if (!getFrame(id) || !(isPane || ui.inline.has(id))) return `Error: no widget or pane with id "${id}".`;
       if (isPane) {
         ui.panes.focus(id); // a pane behind another tab has no layout to draw
-        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        // Let it lay out. Background browser tabs never run animation frames, hence the timer.
+        await Promise.race([
+          new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+          new Promise((r) => setTimeout(r, 100)),
+        ]);
       }
       const shot = await captureFrame(id, { viewport: isPane });
       if (!shot.ok) return `Error: screenshot failed: ${shot.error}`;
