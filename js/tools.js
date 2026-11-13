@@ -6,8 +6,9 @@
 // so they are deliberately terse (~840 tokens on a Qwen template, of which ~540 is the template's
 // fixed tool wrapper). Facts shared by all pages live once in the hint; descriptions state only
 // what a model can't infer. Measure before growing them.
-import { getFrame, settle, formatLogs, patchFrame, updateKv } from './frames.js';
+import { getFrame, settle, formatLogs, patchFrame, updateKv, captureFrame } from './frames.js';
 import { applyEdit, applyLineEdit, numberLines, scriptSyntaxErrors } from './source.js';
+import { compressImage, IMAGE_QUALITY } from './media.js';
 
 const idParam = { type: 'string', description: 'Page id' };
 const htmlParam = { type: 'string', description: 'Fragment or full document' };
@@ -54,6 +55,14 @@ export const TOOL_DEFS = [
   }, ['id']),
 ];
 
+/** Only offered when the model may be able to see images. */
+export const SCREENSHOT_DEF = fn('screenshot', 'See a page as an image, as the user sees it.', { id: idParam }, ['id']);
+
+/** The tool list for a request: screenshot is left out once the model is known not to see images. */
+export function toolDefs({ vision }) {
+  return vision === false ? TOOL_DEFS : [...TOOL_DEFS, SCREENSHOT_DEF];
+}
+
 export const TOOL_SYSTEM_HINT = 'Your tools can render web pages here: use them when a visual or interactive result helps. ' +
   'Pages are sandboxed iframes: no storage or access to the chat; CDN scripts work. ' +
   "fetch() only reaches CORS-enabled servers: if blocked, don't retry. " +
@@ -93,7 +102,9 @@ let autoId = 0;
  *   ui.inline — {has(id), remove(id)} for inline widgets
  *   ui.panes — the pane manager (open/close/has/ids)
  *   ui.canRerender(id) / ui.rerender(id, html) — reload a widget or pane in place with new source (edit)
- * Returns the string sent back to the model as the tool result.
+ *   ui.imageMime() — the format screenshots are encoded in
+ * Returns the string sent back to the model as the tool result, or {text, images} when the
+ * result includes images (each {dataUrl, meta}, see content.js).
  */
 export async function runTool(name, rawArgs, ui) {
   let args;
@@ -206,6 +217,32 @@ export async function runTool(name, rawArgs, ui) {
       const f = getFrame(id);
       if (!f) return `Error: no widget or pane with id "${id}". Open pages: ${ui.listPages().map((p) => p.id).join(', ') || '(none)'}`;
       return readSource(f.html, args.start, args.end);
+    }
+    case 'screenshot': {
+      const id = sanitizeId(args.id);
+      const isPane = ui.panes.has(id);
+      if (!getFrame(id) || !(isPane || ui.inline.has(id))) return `Error: no widget or pane with id "${id}".`;
+      if (isPane) {
+        ui.panes.focus(id); // a pane behind another tab has no layout to draw
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      }
+      const shot = await captureFrame(id, { viewport: isPane });
+      if (!shot.ok) return `Error: screenshot failed: ${shot.error}`;
+      let img;
+      try {
+        img = await compressImage(shot.dataUrl, { mime: ui.imageMime(), quality: IMAGE_QUALITY });
+      } catch (e) {
+        return `Error: screenshot failed: ${e.message}`;
+      }
+      const ext = img.mime === 'image/webp' ? 'webp' : 'jpg';
+      const caveat = shot.hasCanvas ? ' WebGL canvases may be blank unless created with preserveDrawingBuffer: true.' : '';
+      return {
+        text: `Screenshot of "${id}" (${img.width}×${img.height}).${caveat}`,
+        images: [{
+          dataUrl: img.dataUrl,
+          meta: { kind: 'screenshot', name: `${id}.${ext}`, pageId: id, bytes: img.bytes, mime: img.mime, width: img.width, height: img.height },
+        }],
+      };
     }
     default:
       return `Error: unknown tool "${name}".`;

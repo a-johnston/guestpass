@@ -1,6 +1,6 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
 import { listModels, streamChat, fetchProps, capabilitiesFrom } from './api.js';
-import { TOOL_DEFS, TOOL_SYSTEM_HINT, RENDER_TOOLS, omittedHtml, runTool, sanitizeId } from './tools.js';
+import { toolDefs, TOOL_SYSTEM_HINT, RENDER_TOOLS, omittedHtml, runTool, sanitizeId } from './tools.js';
 import { createFrame, removeFrame, getFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
@@ -463,7 +463,7 @@ function buildRequest() {
   });
   const body = { messages: system ? [{ role: 'system', content: system }, ...history] : history };
   if (state.cfg.model) body.model = state.cfg.model;
-  if (toolsOn) body.tools = TOOL_DEFS;
+  if (toolsOn) body.tools = toolDefs({ vision: state.caps.vision });
   if (state.requestUsage) body.stream_options = { include_usage: true };
   return { body, used: mediaUsed(history) };
 }
@@ -639,13 +639,23 @@ async function runTurn() {
             rerender: rerenderPage,
             listPages,
             panes,
+            imageMime,
           });
         } catch (e) {
           output = `Error: ${e.message}`;
         }
-        chip.done(output);
-        state.messages.push({ role: 'tool', tool_call_id: call.id, content: output });
-        if (RENDER_TOOLS.has(call.function.name) && !output.startsWith('Error:')) {
+        // A screenshot comes back as text plus image parts; everything else is a string.
+        const text = typeof output === 'string' ? output : output.text;
+        const images = typeof output === 'string' ? [] : output.images;
+        chip.done(text);
+        state.messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content: images.length
+            ? [{ type: 'text', text }, ...images.map((i) => ({ type: 'image_url', image_url: { url: i.dataUrl }, meta: i.meta }))]
+            : text,
+        });
+        if (RENDER_TOOLS.has(call.function.name) && !text.startsWith('Error:')) {
           try {
             const id = sanitizeId(JSON.parse(call.function.arguments).id);
             if (id) markSuperseded(id, call);

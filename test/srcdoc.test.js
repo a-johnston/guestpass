@@ -47,3 +47,9 @@ test('does not mistake <header> for <head>', () => {
   assert.ok(bootIndex(out) < out.indexOf('<header>'));
   assert.match(out, /^<!DOCTYPE html>/);
 });
+
+test('bootstrap answers screenshot requests', () => {
+  const doc = buildSrcdoc('<p>x</p>');
+  assert.match(doc, /m\.type === 'screenshot'/);
+  assert.match(doc, /screenshot-result/);
+});

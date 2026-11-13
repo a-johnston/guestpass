@@ -79,6 +79,12 @@ export function createPaneManager({ aside, tabs, body, onChange }) {
     get count() { return panes.size; },
     get visible() { return !aside.hidden; },
     show: () => setVisible(true),
+    /** Brings a pane to the front and shows the panel (a hidden pane has no layout to capture). */
+    focus(id) {
+      if (!panes.has(id)) return;
+      activate(id);
+      setVisible(true);
+    },
     hide: () => setVisible(false),
     toggle: () => setVisible(aside.hidden),
   };

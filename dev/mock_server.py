@@ -51,6 +51,9 @@ INLINE_HTML = """<svg viewBox="0 0 200 60" width="100%" height="60"><rect width=
 <script>console.log('inline widget loaded at', new Date().toISOString())</script>"""
 
 
+IMAGE_CARRIER = "Images returned by the tool calls above:"
+
+
 def part_types(msg):
     """The content-part types in a message (empty for plain string content)."""
     content = msg.get("content")
@@ -219,15 +222,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def respond(self, msgs, has_tools):
         last = msgs[-1] if msgs else {}
-        user_msg = next((m for m in reversed(msgs) if m.get("role") == "user"), {})
+        # A user message the client adds to carry tool images (servers rejecting them in tool results).
+        carrier = last.get("role") == "user" and text_of(last.get("content")).startswith(IMAGE_CARRIER)
+        user_msg = next((m for m in reversed(msgs) if m.get("role") == "user"
+                         and not text_of(m.get("content")).startswith(IMAGE_CARRIER)), {})
         user = text_of(user_msg.get("content"))
         received = media_note(user_msg)
         key = user.split("\n\n")[-1]  # the client merges queued messages into one user turn
         if last.get("role") == "tool" and has_tools and key.startswith("call:") and json.loads(key[5:]).get("loop"):
             self.tool_call("kv", {})  # never satisfied: keeps calling tools until the client's round limit
             return self.end_stream()
-        elif last.get("role") == "tool":
-            self.stream_text("Done. The tool reported:\n\n```\n" + last.get("content", "") + "\n```")
+        elif last.get("role") == "tool" or carrier:
+            tool = next(m for m in reversed(msgs) if m.get("role") == "tool")
+            image = "image_url" in part_types(last)
+            self.stream_text("Done. The tool reported:\n\n```\n" + text_of(tool.get("content")) + "\n```" +
+                             ("\n\nThe tool returned an image." if image else ""))
         elif has_tools and key.startswith("call:"):
             spec = json.loads(key[5:])
             if spec.get("think"):

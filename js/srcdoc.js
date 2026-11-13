@@ -93,6 +93,27 @@ const bootstrap = (kvJson) => `<script ${BOOTSTRAP_MARKER}>(function () {
     var m = e.data;
     if (e.source !== parent || !m || m.__guestpass !== 1) return;
     if (m.type === 'kv') { apply(m.key, m.value, m.deleted); return; }
+    if (m.type === 'screenshot') {
+      /* The parent sends the rasterizer's source with the request; it is evaluated once per page. */
+      var done = function (r) { r.type = 'screenshot-result'; r.reqId = m.reqId; send(r); };
+      var fail = function (err) { done({ ok: false, error: fmt(err) }); };
+      try {
+        if (typeof window.htmlToImage === 'undefined') (0, eval)(m.lib);
+        var de = document.documentElement;
+        window.htmlToImage.toCanvas(de, { pixelRatio: 1, width: de.scrollWidth, height: de.scrollHeight }).then(function (full) {
+          try {
+            var c = full;
+            if (m.viewport) {
+              c = document.createElement('canvas');
+              c.width = innerWidth; c.height = innerHeight;
+              c.getContext('2d').drawImage(full, -scrollX, -scrollY);
+            }
+            done({ ok: true, dataUrl: c.toDataURL('image/png'), width: c.width, height: c.height, hasCanvas: !!document.querySelector('canvas') });
+          } catch (err) { fail(err); }
+        }, fail);
+      } catch (err) { fail(err); }
+      return;
+    }
     if (m.type === 'patch') {
       var reply = function (ok, value) { send({ type: 'patch-result', reqId: m.reqId, ok: ok, value: value }); };
       if (typeof window.onPatch !== 'function') return reply(false, 'window.onPatch is not defined in this page');

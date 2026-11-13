@@ -40,7 +40,8 @@ window.addEventListener('message', (e) => {
       case 'kv-set':
         applyKv(String(m.key), m.value, !!m.deleted, e.source);
         break;
-      case 'patch-result': {
+      case 'patch-result':
+      case 'screenshot-result': {
         const p = pendingPatches.get(m.reqId);
         if (p) { pendingPatches.delete(m.reqId); p(m); }
         break;
@@ -124,6 +125,47 @@ export async function patchFrame(id, data) {
     }, PATCH_TIMEOUT_MS);
     pendingPatches.set(reqId, (m) => { clearTimeout(timer); resolve({ ok: !!m.ok, value: m.value }); });
     post(f, { type: 'patch', reqId, data });
+  });
+}
+
+const SCREENSHOT_TIMEOUT_MS = 10000;
+let rasterizer = null; // vendor/html-to-image.js source, fetched once and posted with each request
+
+/**
+ * Renders the frame's page to a PNG inside the frame (the parent can't read a sandboxed frame's
+ * pixels). viewport: the visible area only (panes); otherwise the whole page (widgets).
+ * Resolves {ok:true, dataUrl, width, height, hasCanvas} or {ok:false, error}; never rejects.
+ */
+export async function captureFrame(id, { viewport }) {
+  const f = frames.get(id);
+  if (!f) return { ok: false, error: `no widget or pane with id "${id}"` };
+  let lib;
+  try {
+    rasterizer ??= fetch(new URL('../vendor/html-to-image.js', import.meta.url)).then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.text();
+    });
+    lib = await rasterizer;
+  } catch (e) {
+    rasterizer = null;
+    return { ok: false, error: `couldn't load the screenshot library (${e.message})` };
+  }
+  if (!f.ready) await settle(id, { quiet: 0 });
+  const reqId = ++patchSeq;
+  return new Promise((resolve) => {
+    const finish = (r) => { clearTimeout(timer); clearInterval(watch); pendingPatches.delete(reqId); resolve(r); };
+    const timer = setTimeout(() => finish({ ok: false, error: `no reply within ${SCREENSHOT_TIMEOUT_MS / 1000}s` }), SCREENSHOT_TIMEOUT_MS);
+    // Closing or replacing the page drops its frame; don't wait out the timeout for a reply that can't come.
+    const watch = setInterval(() => { if (frames.get(id) !== f) finish({ ok: false, error: 'the page was closed' }); }, 100);
+    pendingPatches.set(reqId, (m) => {
+      // The page's own code could answer too: accept nothing but a PNG data URL.
+      if (m.ok && typeof m.dataUrl === 'string' && m.dataUrl.startsWith('data:image/png;base64,')) {
+        finish({ ok: true, dataUrl: m.dataUrl, width: Number(m.width) || 0, height: Number(m.height) || 0, hasCanvas: !!m.hasCanvas });
+      } else {
+        finish({ ok: false, error: m.ok ? 'the page sent back something that is not an image' : String(m.error) });
+      }
+    });
+    post(f, { type: 'screenshot', reqId, lib, viewport: !!viewport });
   });
 }
 
