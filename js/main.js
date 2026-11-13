@@ -1,6 +1,6 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
-import { listModels, streamChat } from './api.js';
-import { TOOL_DEFS, TOOL_SYSTEM_HINT, runTool } from './tools.js';
+import { listModels, streamChat, contextLengthFromProps } from './api.js';
+import { TOOL_DEFS, TOOL_SYSTEM_HINT, runTool, sanitizeId } from './tools.js';
 import { createFrame, removeFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
@@ -15,8 +15,12 @@ const $ = (id) => document.getElementById(id);
 // and the address bar only changes when the user presses Connect. Reloading is "clear chat".
 const state = {
   cfg: { baseUrl: '', apiKey: '', model: '', system: '' },
-  // Tools are always offered; if the server rejects them we fall back for the rest of the session.
+  // Optional request features. Each is on until the server rejects a request because of it;
+  // then it is dropped for the rest of the session (see FALLBACKS).
   toolsSupported: true,
+  sendReasoning: true, // reasoning_content on assistant messages of the current turn
+  requestUsage: true, // stream_options.include_usage, for the context counter
+  context: { used: null, max: null },
   messages: [],
   busy: false,
   stream: null, // AbortController of the in-flight completion request
@@ -36,6 +40,7 @@ const el = {
   stop: $('stop-btn'),
   queue: $('queue'),
   status: $('status'),
+  ctx: $('ctx'),
   panesShow: $('panes-show'),
   cfgStatus: $('cfg-status'),
   resizer: $('resizer'),
@@ -91,8 +96,10 @@ async function connect() {
     const models = await listModels({ baseUrl, apiKey });
     // Links don't carry a model (it made them long); use the server's first one. If the server
     // lists none, the field is omitted and the server picks.
-    state.cfg.model = models[0] || '';
+    state.cfg.model = models[0]?.id || '';
     setStatus('ok', `Connected${state.cfg.model ? ` · ${state.cfg.model}` : ''}`);
+    state.context.max = models[0]?.contextLength || (await contextLengthFromProps({ baseUrl, apiKey }));
+    updateContext();
   } catch (e) {
     // Some servers have no /models endpoint; chat may still work, so don't block.
     setStatus('warn', `Model list unavailable: ${e.message}`);
@@ -103,6 +110,23 @@ async function connect() {
 function setStatus(kind, text) {
   el.status.dataset.state = kind;
   el.status.setAttribute('aria-label', text);
+}
+
+/** Top-bar counter: tokens in the latest request (prompt + reply), out of the window if known. */
+function updateContext() {
+  const { used, max } = state.context;
+  el.ctx.hidden = used == null && max == null;
+  if (el.ctx.hidden) return;
+  const text = `${used == null ? '–' : formatTokens(used)}${max ? ` / ${formatTokens(max)}` : ''}`;
+  el.ctx.textContent = text;
+  el.ctx.setAttribute('aria-label', `Context: ${used ?? 'unknown'} of ${max ?? 'unknown'} tokens`);
+  el.ctx.dataset.level = max && used != null ? (used / max >= 0.9 ? 'high' : used / max >= 0.75 ? 'mid' : '') : '';
+}
+
+function formatTokens(n) {
+  if (n < 1000) return String(n);
+  if (n < 100000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  return `${Math.round(n / 1000)}k`;
 }
 
 // ---------------------------------------------------------------- setup (link builder)
@@ -129,7 +153,7 @@ async function refreshModels() {
   try {
     const models = await listModels(cfg);
     if (req !== modelsRequest) return;
-    const using = models.length ? ` Chats will use ${models[0]}${models.length > 1 ? ' (the first listed)' : ''}.` : '';
+    const using = models.length ? ` Chats will use ${models[0].id}${models.length > 1 ? ' (the first listed)' : ''}.` : '';
     showSetupStatus('ok', `Connected — ${models.length} model${models.length === 1 ? '' : 's'} available.${using}`);
   } catch (e) {
     if (req !== modelsRequest) return;
@@ -298,8 +322,15 @@ function pushUser(text) {
 function buildRequest() {
   const toolsOn = state.toolsSupported;
   const system = [state.cfg.system, toolsOn && TOOL_SYSTEM_HINT].filter(Boolean).join('\n\n');
-  // Assistant messages keep their thinking locally (for the transcript); it is never sent back.
-  let history = state.messages.map(({ reasoning, thinkingMs, ...m }) => m);
+  // Thinking: assistant messages keep it locally (for the transcript). It goes back to the server
+  // only for the current turn (after the last user message), so the model keeps its plan across a
+  // tool loop; earlier turns' thinking is dropped, the usual practice for reasoning models.
+  const lastUser = state.messages.findLastIndex((m) => m.role === 'user');
+  let history = state.messages.map(({ reasoning, thinkingMs, ...m }, i) => {
+    if (m.tool_calls) m.tool_calls = m.tool_calls.map(forServer);
+    if (reasoning && i > lastUser && state.sendReasoning) m.reasoning_content = reasoning;
+    return m;
+  });
   if (!toolsOn) {
     // Servers reject tool messages when no tools are declared; strip them from the history.
     history = history
@@ -310,7 +341,47 @@ function buildRequest() {
   const body = { messages: system ? [{ role: 'system', content: system }, ...history] : history };
   if (state.cfg.model) body.model = state.cfg.model;
   if (toolsOn) body.tools = TOOL_DEFS;
+  if (state.requestUsage) body.stream_options = { include_usage: true };
   return body;
+}
+
+/**
+ * A tool call as sent to the server. Once a widget/pane has been re-rendered under the same id,
+ * the older call's HTML is replaced by a stub: the newer version is in context, and page HTML is
+ * by far the largest thing in a widget-heavy history. The local copy (and session.md) keep it all.
+ */
+function forServer({ superseded, ...call }) {
+  if (!superseded) return call;
+  let args;
+  try { args = JSON.parse(call.function.arguments); } catch { return call; }
+  args.html = `[HTML omitted: replaced by a later render of "${args.id}"]`;
+  return { ...call, function: { ...call.function, arguments: JSON.stringify(args) } };
+}
+
+/** Marks earlier renders of `id` as superseded by `latest` (see forServer). */
+function markSuperseded(id, latest) {
+  for (const m of state.messages) {
+    for (const c of m.tool_calls || []) {
+      if (c === latest || c.superseded || !RENDER_TOOLS.has(c.function?.name)) continue;
+      try { if (sanitizeId(JSON.parse(c.function.arguments).id) === id) c.superseded = true; } catch {}
+    }
+  }
+}
+const RENDER_TOOLS = new Set(['render_inline', 'open_pane']);
+
+/**
+ * Optional request features the server may reject. If a request fails with an error mentioning
+ * one that's still on, it's switched off for the session and the request retried without it.
+ */
+const FALLBACKS = [
+  { key: 'toolsSupported', match: /tool|jinja|function.?call/i, notice: 'This server doesn’t accept tool calls, so widgets and panes are off for this session.' },
+  { key: 'sendReasoning', match: /reasoning/i },
+  { key: 'requestUsage', match: /stream_options|include_usage/i },
+];
+
+function fallbackFor(err) {
+  if (!(err.status >= 400 && err.status < 600)) return null;
+  return FALLBACKS.find((f) => state[f.key] && f.match.test(err.message)) || null;
 }
 
 /** Attaches a reply's thinking (text + duration) for the transcript; buildRequest strips it. */
@@ -320,11 +391,6 @@ function withThinking(msg, reasoning, view) {
     msg.thinkingMs = view.thinkingMs();
   }
   return msg;
-}
-
-/** Does this error look like the server refusing the `tools` parameter? */
-function isToolRejection(err) {
-  return state.toolsSupported && err.status >= 400 && err.status < 600 && /tool|jinja|function.?call/i.test(err.message);
 }
 
 /**
@@ -372,10 +438,11 @@ async function runTurn() {
           if (state.interrupt && !state.stopRequested) continue;
           return;
         }
-        if (isToolRejection(e)) {
-          state.toolsSupported = false;
+        const fallback = fallbackFor(e);
+        if (fallback) {
+          state[fallback.key] = false;
           view.remove();
-          notice('This server doesn’t accept tool calls, so widgets and panes are off for this session.', 'warn');
+          if (fallback.notice) notice(fallback.notice, 'warn');
           rounds--;
           continue;
         }
@@ -383,6 +450,11 @@ async function runTurn() {
         return;
       }
       state.stream = null;
+      if (result.usage) {
+        const u = result.usage;
+        state.context.used = u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0);
+        updateContext();
+      }
 
       view.finish(result);
       const msg = withThinking({ role: 'assistant', content: result.content }, result.reasoning, view);
@@ -407,6 +479,12 @@ async function runTurn() {
         }
         chip.done(output);
         state.messages.push({ role: 'tool', tool_call_id: call.id, content: output });
+        if (RENDER_TOOLS.has(call.function.name) && !output.startsWith('Error:')) {
+          try {
+            const id = sanitizeId(JSON.parse(call.function.arguments).id);
+            if (id) markSuperseded(id, call);
+          } catch {}
+        }
       }
       if (state.stopRequested) return;
     }

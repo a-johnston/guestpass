@@ -30,7 +30,19 @@ test('accumulator concatenates content and reasoning (both field spellings)', ()
   acc.apply(delta({ reasoning: 'm.' }));
   acc.apply(delta({ content: 'Hel' }));
   acc.apply(delta({ content: 'lo' }, 'stop'));
-  assert.deepEqual(acc.result(), { content: 'Hello', reasoning: 'hmm.', toolCalls: [], finishReason: 'stop' });
+  assert.deepEqual(acc.result(), { content: 'Hello', reasoning: 'hmm.', toolCalls: [], finishReason: 'stop', usage: null });
+});
+
+test('accumulator picks up usage from either placement', () => {
+  const usage = { prompt_tokens: 59, completion_tokens: 31, total_tokens: 90 };
+  const onFinishChunk = createAccumulator(); // basalt / llama.cpp style
+  onFinishChunk.apply({ choices: [{ delta: {}, finish_reason: 'stop' }], usage });
+  assert.deepEqual(onFinishChunk.result().usage, usage);
+  const separate = createAccumulator(); // OpenAI style: trailing chunk with empty choices
+  separate.apply(delta({ content: 'x' }, 'stop'));
+  separate.apply({ choices: [], usage });
+  assert.deepEqual(separate.result().usage, usage);
+  assert.equal(separate.result().content, 'x');
 });
 
 test('accumulator assembles streamed tool calls by index', () => {

@@ -179,6 +179,6 @@ function truncate(s) {
   return s.length > MAX_RESULT_CHARS ? `${s.slice(0, MAX_RESULT_CHARS)}\n… (truncated)` : s;
 }
 
-function sanitizeId(id) {
+export function sanitizeId(id) {
   return String(id ?? '').trim().replace(/[^\w.-]+/g, '-').slice(0, 64);
 }

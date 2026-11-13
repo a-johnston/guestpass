@@ -29,7 +29,28 @@ export async function listModels({ baseUrl, apiKey, signal }) {
   }
   if (!res.ok) throw new Error(`GET /models failed: HTTP ${res.status} ${(await res.text()).slice(0, 300)}`);
   const json = await res.json();
-  return (json.data || json.models || []).map((m) => m.id || m.name).filter(Boolean).sort();
+  // Keep the server's order: "the first model" means the one the server lists first.
+  return (json.data || json.models || [])
+    .map((m) => ({ id: m.id || m.name, contextLength: contextLengthOf(m) }))
+    .filter((m) => m.id);
+}
+
+/** Context window as reported by various servers' /models entries, if any. */
+export function contextLengthOf(m) {
+  const n = m?.meta?.n_ctx ?? m?.max_model_len ?? m?.context_length ?? m?.context_window ?? m?.meta?.n_ctx_train;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** llama.cpp-style servers report the runtime context at <root>/props. Best effort; null if absent. */
+export async function contextLengthFromProps({ baseUrl, apiKey }) {
+  try {
+    const res = await fetch(`${baseUrl.replace(/\/v1$/, '')}/props`, { headers: headers(apiKey) });
+    if (!res.ok) return null;
+    const n = (await res.json())?.default_generation_settings?.n_ctx;
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

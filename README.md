@@ -17,6 +17,8 @@ A static, no-build chat front-end for any OpenAI-compatible server with tool cal
   Console output and errors are captured and returned as the tool result, so the model can fix its own code. Fenced ```` ```html ```` blocks also get Run and Open-in-pane buttons, for models without tool support.
 - No localStorage, sessionStorage or cookies. Reloading the page is how you clear the chat. Bookmark a link to reuse it.
 - Cmd/Ctrl+S saves the conversation as `session.md`, including tool calls and the HTML they rendered, but never the server URL or API key.
+- The top bar shows context use (`12.3k / 131k`): tokens from the server's `usage` report, out of the window size found in `/models` (`meta.n_ctx`, `max_model_len`, `context_length`) or `/props`.
+- Context handling: the model's thinking is sent back (as `reasoning_content`) only within the current turn, so it keeps its plan across a tool loop; earlier turns' thinking is dropped. Once a widget or pane is re-rendered under the same id, the older HTML is replaced by a stub in what's sent to the server. Optional request fields (`tools`, `reasoning_content`, `stream_options`) are dropped for the session if the server rejects them.
 
 ## Security model
 
@@ -26,7 +28,7 @@ Model-authored HTML runs in `<iframe sandbox="allow-scripts …">` without `allo
 
 ```sh
 python3 -m http.server 8080              # serve the site
-python3 dev/mock_server.py --key sk-test # fake API at http://localhost:8099/v1 (add --no-tools to simulate a server without tool support)
+python3 dev/mock_server.py --key sk-test # fake API at http://localhost:8099/v1 (--no-tools / --no-reasoning simulate servers rejecting those)
 node --test test/                        # unit tests (share codec, SSE/stream parsing, srcdoc injection)
 ```
 

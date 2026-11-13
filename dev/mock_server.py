@@ -4,9 +4,12 @@
     python3 dev/mock_server.py [--port 8099] [--key sk-test] [--no-tools]
 
 --no-tools rejects any request carrying `tools`, like llama-server without --jinja.
+--no-reasoning rejects requests whose messages carry `reasoning_content`.
+/models reports mock-1 with meta.n_ctx 8192; with stream_options.include_usage, a rough token
+count is sent OpenAI-style (a final chunk with empty choices).
 
 Scripted behaviour, keyed off the last user message:
-  call:{"name": "...", "args": {...}}
+  call:{"name": "...", "args": {...}, "think": "optional reasoning"}
                     -> emits exactly that tool call (drive any tool from the chat box)
   contains "code"   -> replies with python, js, and unlabeled code blocks (for highlighting)
   contains "long"   -> streams 80 paragraphs over ~4s (for auto-scroll tests)
@@ -49,6 +52,8 @@ def chunk(delta, finish=None):
 class Handler(BaseHTTPRequestHandler):
     key = None
     no_tools = False
+    no_reasoning = False
+    usage = None
 
     def cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -75,7 +80,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(404)
         if not self.authorized():
             return
-        body = json.dumps({"object": "list", "data": [{"id": "mock-1"}, {"id": "mock-2"}]}).encode()
+        body = json.dumps({"object": "list", "data": [
+            {"id": "mock-1", "meta": {"n_ctx": 8192}}, {"id": "mock-2"}]}).encode()
         self.send_response(200)
         self.cors()
         self.send_header("Content-Type", "application/json")
@@ -92,13 +98,13 @@ class Handler(BaseHTTPRequestHandler):
         msgs = req.get("messages", [])
         has_tools = bool(req.get("tools"))
         if has_tools and self.no_tools:
-            body = json.dumps({"error": {"message": "tools param requires --jinja flag"}}).encode()
-            self.send_response(500)
-            self.cors()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(body)
-            return
+            return self.reject(500, "tools param requires --jinja flag")
+        if self.no_reasoning and any("reasoning_content" in m for m in msgs):
+            return self.reject(400, "unsupported field: reasoning_content")
+        # Rough token count (4 chars/token) so the client's context counter has numbers to show.
+        self.usage = None
+        if (req.get("stream_options") or {}).get("include_usage"):
+            self.usage = {"prompt_tokens": len(json.dumps(msgs)) // 4, "completion_tokens": 0}
         self.send_response(200)
         self.cors()
         self.send_header("Content-Type", "text/event-stream")
@@ -109,7 +115,19 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def reject(self, status, message):
+        body = json.dumps({"error": {"message": message}}).encode()
+        self.send_response(status)
+        self.cors()
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
     def emit(self, obj, split=True):
+        if self.usage is not None:
+            for c in obj.get("choices", []):
+                d = c.get("delta", {})
+                self.usage["completion_tokens"] += len(d.get("content") or "") // 4 + len(d.get("reasoning_content") or "") // 4
         data = f"data: {json.dumps(obj)}\n\n".encode()
         parts = [data[: len(data) // 2], data[len(data) // 2:]] if split else [data]
         for p in parts:
@@ -137,6 +155,8 @@ class Handler(BaseHTTPRequestHandler):
             self.stream_text("Done. The tool reported:\n\n```\n" + last.get("content", "") + "\n```")
         elif has_tools and key.startswith("call:"):
             spec = json.loads(key[5:])
+            if spec.get("think"):
+                self.stream_text(spec["think"], field="reasoning_content")
             self.tool_call(spec["name"], spec.get("args", {}))
             return self.end_stream()
         elif "code" in key.lower():
@@ -170,6 +190,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_stream()
 
     def end_stream(self):
+        if self.usage is not None:  # OpenAI placement: a final chunk with empty choices
+            u = dict(self.usage, total_tokens=self.usage["prompt_tokens"] + self.usage["completion_tokens"])
+            self.wfile.write(f"data: {json.dumps({'choices': [], 'usage': u})}\n\n".encode())
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
@@ -182,8 +205,10 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8099)
     ap.add_argument("--key", default=None)
     ap.add_argument("--no-tools", action="store_true")
+    ap.add_argument("--no-reasoning", action="store_true")
     a = ap.parse_args()
     Handler.key = a.key
     Handler.no_tools = a.no_tools
+    Handler.no_reasoning = a.no_reasoning
     print(f"mock server on http://localhost:{a.port}/v1" + (f" (key: {a.key})" if a.key else ""))
     ThreadingHTTPServer(("127.0.0.1", a.port), Handler).serve_forever()
