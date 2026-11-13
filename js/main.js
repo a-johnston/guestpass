@@ -127,10 +127,11 @@ async function connect() {
   } catch (e) {
     state.conn = 'failed';
     updatePlaceholder();
-    const reason = e.name === 'TimeoutError' ? `no response after ${CONNECT_TIMEOUT_MS / 1000} s` : e.message;
-    setStatus('warn', `Couldn't connect: ${reason}`);
+    const why = e.name === 'TimeoutError' ? `No response after ${CONNECT_TIMEOUT_MS / 1000} s.` : e.message;
+    const reason = `Couldn't connect. ${why}${/[.!?]$/.test(why) ? '' : '.'}`;
+    setStatus('warn', reason);
     const waiting = state.queue.length ? ' Your queued message is waiting: retry, or use its "Send now" to try without a model.' : '';
-    const n = notice(`Couldn't reach the server (${reason}).${waiting}`, 'warn');
+    const n = notice(`${reason}${waiting}`, 'warn');
     const retry = h('button', 'ghost small', 'Retry');
     retry.type = 'button';
     retry.addEventListener('click', () => { n.remove(); connect(); });

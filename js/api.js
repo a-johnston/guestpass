@@ -7,17 +7,20 @@ function headers(apiKey) {
   return h;
 }
 
-/** Turns an opaque fetch failure into something actionable. */
+/**
+ * Turns an opaque fetch failure into something actionable. The message never names the server:
+ * share-link recipients see it, and the link shouldn't reveal the address it connects to.
+ */
 export function explainNetworkError(err, baseUrl) {
   if (err?.name === 'AbortError') return err;
   if (!(err instanceof TypeError)) return err;
   let target;
-  try { target = new URL(baseUrl); } catch { return new Error(`Invalid server URL: ${baseUrl}`); }
+  try { target = new URL(baseUrl); } catch { return new Error('Invalid server URL.'); }
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname);
   if (location.protocol === 'https:' && target.protocol === 'http:' && !loopback) {
-    return new Error(`Blocked: this page is served over HTTPS, so browsers refuse to call plain-HTTP ${target.host}. Put the server behind TLS (e.g. a Caddy reverse proxy).`);
+    return new Error('Blocked: this page is served over HTTPS, so browsers refuse to call a plain-HTTP server. Put the server behind TLS (e.g. a Caddy reverse proxy).');
   }
-  return new Error(`Could not reach ${target.host}. Check that the server is up, its TLS certificate is valid, and it sends CORS headers allowing this origin (${location.origin}) and the Authorization header.`);
+  return new Error(`The server didn't answer, or the browser blocked its reply. Check that it is up, its TLS certificate is valid, and it sends CORS headers allowing this origin (${location.origin}) and the Authorization header.`);
 }
 
 export async function listModels({ baseUrl, apiKey, signal }) {
