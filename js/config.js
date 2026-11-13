@@ -1,6 +1,6 @@
 // Connection config and the share-link codec.
 //
-// A share link is the app URL with `#c=<base64url(payload)>`, where the payload is plain text:
+// A share link is the app URL with `#<base64url(payload)>`, where the payload is plain text:
 //
 //     <baseUrl> [<apiKey> [<system prompt…>]]
 //
@@ -9,8 +9,6 @@
 // keep links short. The fragment is never sent to the web host, so the connection details only
 // travel between the browser and the model server. This is encoding, not encryption: anyone
 // with the link has the key. The model is not included; the chat uses the server's first model.
-
-const HASH_PARAM = 'c';
 
 /** @typedef {{baseUrl:string, apiKey:string, system:string}} Config */
 
@@ -51,7 +49,7 @@ export function decodeConfig(encoded) {
 
 /** Returns the decoded config from a location.hash string, or null if none is present. */
 export function readShareFromHash(hash) {
-  const encoded = new URLSearchParams((hash || '').replace(/^#/, '')).get(HASH_PARAM);
+  const encoded = (hash || '').replace(/^#/, '');
   return encoded ? decodeConfig(encoded) : null;
 }
 
@@ -65,5 +63,5 @@ export function normalizeBaseUrl(url) {
 
 /** Builds a share link for `cfg` rooted at the given page URL (without its hash). */
 export function buildShareLink(pageUrl, cfg) {
-  return `${pageUrl.split('#')[0]}#${HASH_PARAM}=${encodeConfig(cfg)}`;
+  return `${pageUrl.split('#')[0]}#${encodeConfig(cfg)}`;
 }

@@ -9,7 +9,7 @@ const MAX_TOOL_ROUNDS = 10;
 const PROMPT_MAX_PX = 240;
 const $ = (id) => document.getElementById(id);
 
-// The page has two faces: without a `#c=` link it is a link builder; with one it is the chat.
+// The page has two faces: without a `#<payload>` link it is a link builder; with one it is the chat.
 // All state lives in memory only. Nothing is written to localStorage/sessionStorage/cookies,
 // and the address bar only changes when the user presses Connect. Reloading is "clear chat".
 const state = {

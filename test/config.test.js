@@ -35,10 +35,11 @@ test('rejects garbage and non-http URLs', () => {
   assert.throws(() => decodeConfig(Buffer.from([0xff, 0xfe]).toString('base64url')), /malformed/);
 });
 
-test('readShareFromHash reads the c param', () => {
+test('readShareFromHash decodes the whole fragment', () => {
   assert.equal(readShareFromHash(''), null);
-  assert.equal(readShareFromHash('#other=1'), null);
-  assert.deepEqual(readShareFromHash(`#c=${b64('https://x/v1 k')}`), { baseUrl: 'https://x/v1', apiKey: 'k', system: '' });
+  assert.equal(readShareFromHash('#'), null);
+  assert.deepEqual(readShareFromHash(`#${b64('https://x/v1 k')}`), { baseUrl: 'https://x/v1', apiKey: 'k', system: '' });
+  assert.throws(() => readShareFromHash('#garbage!!'), /malformed/);
 });
 
 test('normalizeBaseUrl trims slashes and a pasted endpoint suffix', () => {
@@ -49,5 +50,5 @@ test('normalizeBaseUrl trims slashes and a pasted endpoint suffix', () => {
 
 test('buildShareLink replaces any existing hash', () => {
   const link = buildShareLink('https://me.github.io/chat-bridge/#old', { baseUrl: 'https://x/v1/', apiKey: 'k' });
-  assert.equal(link, `https://me.github.io/chat-bridge/#c=${b64('https://x/v1 k')}`);
+  assert.equal(link, `https://me.github.io/chat-bridge/#${b64('https://x/v1 k')}`);
 });
