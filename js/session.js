@@ -1,5 +1,7 @@
 // Converts the conversation (the OpenAI-style message list) into a markdown document for
 // saving. Pure, so it is unit tested under Node. The server URL and API key are never included.
+// Images and files appear as placeholders ("[image: cat.webp]"), never as base64.
+import { fence, contentText } from './content.js';
 
 /**
  * @param {{role:string, content?:string, tool_calls?:any[], tool_call_id?:string}[]} messages
@@ -13,7 +15,8 @@ export function sessionToMarkdown(messages, { model = '', system = '', savedAt =
   if (system.trim()) out.push('**System prompt:**', '', quote(system), '');
   out.push('---', '');
 
-  const results = new Map(messages.filter((m) => m.role === 'tool').map((m) => [m.tool_call_id, m.content ?? '']));
+  const results = new Map(messages.filter((m) => m.role === 'tool')
+    .map((m) => [m.tool_call_id, contentText(m.content ?? '', { placeholders: true })]));
   let lastHeading = '';
   const heading = (name) => {
     if (lastHeading !== name) out.push(`## ${name}`, '');
@@ -23,7 +26,7 @@ export function sessionToMarkdown(messages, { model = '', system = '', savedAt =
   for (const m of messages) {
     if (m.role === 'user') {
       heading('User');
-      out.push((m.content ?? '').trimEnd(), '');
+      out.push(contentText(m.content ?? '', { placeholders: true }).trimEnd(), '');
     } else if (m.role === 'assistant') {
       heading('Assistant'); // one heading per turn, even across several tool rounds
       if (m.reasoning) out.push(...thinkingBlock(m.reasoning, m.thinkingMs));
@@ -71,13 +74,6 @@ function toolCallBlock(call, result) {
   if (result != null) lines.push('Result:', '', fence(result), '');
   lines.push('</details>', '');
   return lines;
-}
-
-/** A code fence longer than any backtick run inside `text`, so the content can't close it early. */
-function fence(text, lang = '') {
-  const longest = Math.max(2, ...(String(text).match(/`+/g) || []).map((s) => s.length));
-  const ticks = '`'.repeat(longest + 1);
-  return `${ticks}${lang}\n${String(text).replace(/\n$/, '')}\n${ticks}`;
 }
 
 function quote(text) {

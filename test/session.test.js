@@ -48,6 +48,23 @@ test('formatDuration', async () => {
   assert.deepEqual([400, 1000, 12400, 125000].map(formatDuration), ['1 second', '1 second', '12 seconds', '2m 5s']);
 });
 
+test('media becomes placeholders, never base64', () => {
+  const md = sessionToMarkdown([{ role: 'user', content: [{ type: 'text', text: 'look' },
+    { type: 'image_url', image_url: { url: 'data:image/webp;base64,QUJD' }, meta: { kind: 'attachment', name: 'cat.webp' } }] }], { savedAt });
+  assert.match(md, /## User\n\nlook\n\n\[image: cat\.webp\]\n/);
+  assert.doesNotMatch(md, /base64/);
+});
+
+test('a screenshot tool result reads as text plus a placeholder', () => {
+  const md = sessionToMarkdown([
+    { role: 'assistant', content: '', tool_calls: [{ id: 's', function: { name: 'screenshot', arguments: '{"id":"app"}' } }] },
+    { role: 'tool', tool_call_id: 's', content: [{ type: 'text', text: 'Screenshot of "app" (800×600).' },
+      { type: 'image_url', image_url: { url: 'data:image/webp;base64,QUJD' }, meta: { kind: 'screenshot', pageId: 'app' } }] },
+  ], { savedAt });
+  assert.match(md, /Result:\n\n```\nScreenshot of "app" \(800×600\)\.\n\n\[screenshot of "app"\]\n```/);
+  assert.doesNotMatch(md, /base64/);
+});
+
 test('unparseable tool arguments are kept raw', () => {
   const md = sessionToMarkdown([{ role: 'assistant', tool_calls: [{ id: 'x', function: { name: 'patch', arguments: '{oops' } }] }], { savedAt });
   assert.match(md, /<summary>Tool call: patch<\/summary>\n\n```\n\{oops\n```/);
