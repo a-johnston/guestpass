@@ -8,6 +8,8 @@ A static, no-build chat front-end for any OpenAI-compatible server with tool cal
   - `pane`: a full page or app in a tabbed side pane (passing the same id reloads it with new content)
   - `patch`: send JSON to a running widget/pane's `window.onPatch(data)` without reloading it; the return value comes back to the model
   - `kv`: read/update a key/value store shared live by every widget and pane (exposed inside them as `kv.get/set/delete/all/subscribe`)
+  - `edit`: replace text in a page's source (exactly one match) and reload it in place; each page is treated as a single-file app, so fixes don't resend the whole page
+  - `read`: a page's current source with line numbers, optionally a line range
   - `close`: close a pane or remove a widget
   - `read_console`
 

@@ -7,6 +7,7 @@
 // fixed tool wrapper). Facts shared by all pages live once in the hint; descriptions state only
 // what a model can't infer. Measure before growing them.
 import { getFrame, settle, formatLogs, patchFrame, updateKv } from './frames.js';
+import { applyEdit, numberLines } from './source.js';
 
 const idParam = { type: 'string', description: 'Page id' };
 const htmlParam = { type: 'string', description: 'Fragment or full document' };
@@ -34,6 +35,16 @@ export const TOOL_DEFS = [
   fn('kv', 'Read the shared store, optionally setting keys first (null deletes). Returns the whole store.', {
     set: { type: 'object' },
   }),
+  fn('edit', "Replace text in a page's source and reload it. old must match exactly once.", {
+    id: idParam,
+    old: { type: 'string' },
+    new: { type: 'string' },
+  }, ['id', 'old', 'new']),
+  fn('read', "A page's current source with line numbers.", {
+    id: idParam,
+    start: { type: 'integer' },
+    end: { type: 'integer' },
+  }, ['id']),
   fn('close', 'Close a page.', { id: idParam }, ['id']),
   fn('read_console', "A page's logged console output since it rendered.", { id: idParam }, ['id']),
 ];
@@ -44,7 +55,8 @@ export const TOOL_SYSTEM_HINT = 'Your tools can render web pages here: use them 
   'In pages: kv is a store shared live by all pages and the kv tool (get, set, delete, all; subscribe((k, v) => …) fires on every change). ' +
   'Defining window.onPatch = (data) => result lets the patch tool update a page in place. ' +
   'Inline and pane pages share one id namespace: reusing an id replaces the existing one. ' +
-  'inline, pane, and patch return console output.';
+  'Each page is a single-file app: build large ones incrementally, starting small and then using edit. ' +
+  'inline, pane, edit, and patch return console output.';
 
 /** Tools that render a page (and so can supersede an earlier render of the same id). */
 export const RENDER_TOOLS = new Set(['inline', 'pane']);
@@ -57,6 +69,7 @@ let autoId = 0;
  *   ui.mountInline({id, title, html, height}) — adds a widget card to the current reply, replacing any widget with that id
  *   ui.inline — {has(id), remove(id)} for inline widgets
  *   ui.panes — the pane manager (open/close/has/ids)
+ *   ui.canRerender(id) / ui.rerender(id, html) — reload a widget or pane in place with new source (edit)
  * Returns the string sent back to the model as the tool result.
  */
 export async function runTool(name, rawArgs, ui) {
@@ -111,6 +124,27 @@ export async function runTool(name, rawArgs, ui) {
       const f = getFrame(sanitizeId(args.id));
       if (!f) return `No widget or pane with id "${args.id}".`;
       return truncate(formatLogs(f.logs));
+    }
+    case 'edit': {
+      const id = sanitizeId(args.id);
+      const f = getFrame(id);
+      if (!f || !ui.canRerender(id)) return `Error: no widget or pane with id "${id}".`;
+      if (typeof args.old !== 'string' || typeof args.new !== 'string') return 'Error: "old" and "new" must be strings.';
+      const r = applyEdit(f.html, args.old, args.new);
+      if (r.error) return `Error: ${r.error}.`;
+      ui.rerender(id, r.source);
+      await settle(id);
+      const where = r.startLine === r.endLine ? `line ${r.startLine}` : `lines ${r.startLine}-${r.endLine}`;
+      return `Edited "${id}" (${where}); reloaded.\nConsole:\n${consoleOf(id)}`;
+    }
+    case 'read': {
+      const id = sanitizeId(args.id);
+      const f = getFrame(id);
+      if (!f) return `Error: no widget or pane with id "${id}".`;
+      const out = numberLines(f.html, args.start, args.end);
+      return out.length > MAX_RESULT_CHARS
+        ? `${out.slice(0, MAX_RESULT_CHARS)}\n… (truncated; read a smaller range with start/end)`
+        : out;
     }
     default:
       return `Error: unknown tool "${name}".`;

@@ -75,6 +75,7 @@ export function createPaneManager({ aside, tabs, body, onChange }) {
     clear,
     has: (id) => panes.has(id),
     ids: () => [...panes.keys()],
+    titleOf: (id) => panes.get(id)?.title,
     get count() { return panes.size; },
     get visible() { return !aside.hidden; },
     show: () => setVisible(true),

@@ -546,6 +546,8 @@ async function runTurn() {
           output = await runTool(call.function.name, call.function.arguments, {
             mountInline: (w) => mountInlineWidget(view, chip, w),
             inline: { has: (id) => state.inline.has(id), remove: (id) => removeInlineWidget(id, 'removed') },
+            canRerender: (id) => state.inline.has(id) || panes.has(id),
+            rerender: rerenderPage,
             panes,
           });
         } catch (e) {
@@ -578,8 +580,21 @@ function mountInlineWidget(view, chip, widget) {
   if (state.inline.has(widget.id)) removeInlineWidget(widget.id, 'replaced');
   const card = widgetCard(widget);
   view.extras.append(card);
-  state.inline.set(widget.id, { card, chip });
+  state.inline.set(widget.id, { card, chip, widget });
   followScroll();
+}
+
+/** Reloads a page with edited source where it already is: a widget keeps its place in the chat. */
+function rerenderPage(id, html) {
+  const entry = state.inline.get(id);
+  if (entry) {
+    entry.widget = { ...entry.widget, html };
+    const card = widgetCard(entry.widget);
+    entry.card.replaceWith(card);
+    entry.card = card;
+  } else if (panes.has(id)) {
+    panes.open(id, panes.titleOf(id), html);
+  }
 }
 
 /** Removes a live inline widget; its tool-call line stays, marked with `reason`. */
