@@ -34,7 +34,12 @@ export async function listModels({ baseUrl, apiKey, signal }) {
   const json = await res.json();
   // Keep the server's order: "the first model" means the one the server lists first.
   return (json.data || json.models || [])
-    .map((m) => ({ id: m.id || m.name, contextLength: contextLengthOf(m) }))
+    .map((m) => ({
+      id: m.id || m.name,
+      contextLength: contextLengthOf(m),
+      // OpenRouter-style, also reported by basalt: ["text", "image", …]
+      inputModalities: Array.isArray(m.architecture?.input_modalities) ? m.architecture.input_modalities : null,
+    }))
     .filter((m) => m.id);
 }
 
@@ -44,16 +49,34 @@ export function contextLengthOf(m) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-/** llama.cpp-style servers report the runtime context at <root>/props. Best effort; null if absent. */
-export async function contextLengthFromProps({ baseUrl, apiKey }) {
+/** llama.cpp-style servers (and basalt) describe themselves at <root>/props. Best effort; null if absent. */
+export async function fetchProps({ baseUrl, apiKey }) {
   try {
     const res = await fetch(`${baseUrl.replace(/\/v1$/, '')}/props`, { headers: headers(apiKey) });
     if (!res.ok) return null;
-    const n = (await res.json())?.default_generation_settings?.n_ctx;
-    return Number.isFinite(n) && n > 0 ? n : null;
+    const json = await res.json();
+    return json && typeof json === 'object' ? json : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * What the model and server accept, from a /models entry and /props (either may be missing).
+ * vision is null when nobody says: callers treat that as "try it".
+ */
+export function capabilitiesFrom(model, props) {
+  let vision = null;
+  if (Array.isArray(model?.inputModalities)) vision = model.inputModalities.includes('image');
+  else if (typeof props?.modalities?.vision === 'boolean') vision = props.modalities.vision;
+  const basaltCaps = props?.basalt?.capabilities;
+  const n = props?.default_generation_settings?.n_ctx;
+  return {
+    vision,
+    documents: Array.isArray(basaltCaps) && basaltCaps.includes('documents'),
+    basalt: !!props?.basalt,
+    contextLength: model?.contextLength || (Number.isFinite(n) && n > 0 ? n : null),
+  };
 }
 
 /**

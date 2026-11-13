@@ -1,5 +1,5 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
-import { listModels, streamChat, contextLengthFromProps } from './api.js';
+import { listModels, streamChat, fetchProps, capabilitiesFrom } from './api.js';
 import { TOOL_DEFS, TOOL_SYSTEM_HINT, RENDER_TOOLS, omittedHtml, runTool, sanitizeId } from './tools.js';
 import { createFrame, removeFrame, getFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
@@ -29,6 +29,8 @@ const state = {
   sendReasoning: true, // reasoning_content on assistant messages (see thinkingMode)
   thinkingMode: 'all', // 'turn': current turn only; 'all': every turn (options popover)
   requestUsage: true, // stream_options.include_usage, for the context counter
+  // From /models and /props at connect. vision: null = not reported (tried until rejected).
+  caps: { vision: null, documents: false, basalt: false },
   context: { used: null, max: null },
   conn: 'pending', // model list: 'pending' (messages queue) | 'ok' | 'failed'
   charsPerToken: 4, // streamed chars per output token, calibrated from usage; for live estimates
@@ -121,9 +123,12 @@ async function connect() {
     state.conn = 'ok';
     setStatus('ok', `Connected${state.cfg.model ? ` · ${state.cfg.model}` : ''}`);
     updatePlaceholder();
-    if (state.queue.length && !state.busy) runTurn();
-    state.context.max = models[0]?.contextLength || (await contextLengthFromProps({ baseUrl, apiKey }));
+    // Capabilities before the first send: they decide how attachments and tools are offered.
+    const caps = capabilitiesFrom(models[0] ?? {}, await fetchProps({ baseUrl, apiKey }));
+    state.caps = { vision: caps.vision, documents: caps.documents, basalt: caps.basalt };
+    state.context.max = caps.contextLength;
     updateContext();
+    if (state.queue.length && !state.busy) runTurn();
   } catch (e) {
     state.conn = 'failed';
     updatePlaceholder();

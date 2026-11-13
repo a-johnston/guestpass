@@ -5,6 +5,9 @@
 
 --no-tools rejects any request carrying `tools`, like llama-server without --jinja.
 --no-reasoning rejects requests whose messages carry `reasoning_content`.
+--no-vision reports a text-only model and rejects image parts; --no-documents rejects `file` parts;
+--no-tool-images rejects images inside tool messages (as many servers do).
+/props reports vision, n_ctx, and basalt's `documents` capability, like basalt 0.3.3.
 --models-delay / --models-status slow down or fail /models (for the connecting state).
 /models reports mock-1 with meta.n_ctx 8192; with stream_options.include_usage, a rough token
 count is sent OpenAI-style (a final chunk with empty choices).
@@ -56,6 +59,9 @@ class Handler(BaseHTTPRequestHandler):
     key = None
     no_tools = False
     no_reasoning = False
+    no_vision = False
+    no_documents = False
+    no_tool_images = False
     models_delay = 0.0
     models_status = 200
     usage = None
@@ -81,15 +87,36 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
-        if not self.path.rstrip("/").endswith("/models"):
+        path = self.path.rstrip("/")
+        if path.endswith("/props"):
+            return self.props()
+        if not path.endswith("/models"):
             return self.send_error(404)
         if not self.authorized():
             return
         time.sleep(self.models_delay)
         if self.models_status != 200:
             return self.reject(self.models_status, "model list unavailable (--models-status)")
+        modalities = ["text"] if self.no_vision else ["text", "image"]
         body = json.dumps({"object": "list", "data": [
-            {"id": "mock-1", "meta": {"n_ctx": 8192}}, {"id": "mock-2"}]}).encode()
+            {"id": "mock-1", "meta": {"n_ctx": 8192}, "architecture": {"input_modalities": modalities}},
+            {"id": "mock-2"}]}).encode()
+        self.send_response(200)
+        self.cors()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def props(self):
+        """llama.cpp's /props at the server root, with basalt's extra key (as basalt 0.3.3 reports it)."""
+        if not self.authorized():
+            return
+        body = json.dumps({
+            "default_generation_settings": {"n_ctx": 8192},
+            "modalities": {"vision": not self.no_vision},
+            "basalt": {"version": "mock", "capabilities": [] if self.no_documents else ["documents"]},
+        }).encode()
         self.send_response(200)
         self.cors()
         self.send_header("Content-Type", "application/json")
@@ -219,12 +246,18 @@ if __name__ == "__main__":
     ap.add_argument("--key", default=None)
     ap.add_argument("--no-tools", action="store_true")
     ap.add_argument("--no-reasoning", action="store_true")
+    ap.add_argument("--no-vision", action="store_true", help="report and act like a text-only model")
+    ap.add_argument("--no-documents", action="store_true", help="reject file content parts")
+    ap.add_argument("--no-tool-images", action="store_true", help="reject images inside tool messages")
     ap.add_argument("--models-delay", type=float, default=0.0, help="seconds before /models answers")
     ap.add_argument("--models-status", type=int, default=200, help="make /models fail with this status")
     a = ap.parse_args()
     Handler.key = a.key
     Handler.no_tools = a.no_tools
     Handler.no_reasoning = a.no_reasoning
+    Handler.no_vision = a.no_vision
+    Handler.no_documents = a.no_documents
+    Handler.no_tool_images = a.no_tool_images
     Handler.models_delay = a.models_delay
     Handler.models_status = a.models_status
     print(f"mock server on http://localhost:{a.port}/v1" + (f" (key: {a.key})" if a.key else ""))
