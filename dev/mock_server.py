@@ -144,15 +144,17 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.01)
 
     def stream_text(self, text, field="content"):
-        for i in range(0, len(text), 6):
-            self.emit(chunk({field: text[i:i + 6]}))
+        step = max(6, len(text) // 300)  # long echoes (e.g. a big read result) stay a few seconds
+        for i in range(0, len(text), step):
+            self.emit(chunk({field: text[i:i + step]}))
 
     def tool_call(self, name, args):
         raw = json.dumps(args)
         self.emit(chunk({"role": "assistant", "tool_calls": [
             {"index": 0, "id": "call_1", "type": "function", "function": {"name": name, "arguments": ""}}]}))
-        for i in range(0, len(raw), 40):
-            self.emit(chunk({"tool_calls": [{"index": 0, "function": {"arguments": raw[i:i + 40]}}]}))
+        step = max(40, len(raw) // 100)  # big pages stream in ~100 chunks instead of hundreds
+        for i in range(0, len(raw), step):
+            self.emit(chunk({"tool_calls": [{"index": 0, "function": {"arguments": raw[i:i + step]}}]}))
         self.emit(chunk({}, "tool_calls"))
 
     def respond(self, msgs, has_tools):

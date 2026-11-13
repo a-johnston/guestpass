@@ -1,6 +1,37 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyEdit, numberLines } from '../js/source.js';
+import { applyEdit, applyLineEdit, numberLines, scriptSyntaxErrors } from '../js/source.js';
+
+test('applyLineEdit replaces an inclusive line range (and deletes with empty text)', () => {
+  const s = 'a\nb\nc\nd\ne';
+  assert.deepEqual(applyLineEdit(s, 2, 3, 'B\nC2\nC3'), { source: 'a\nB\nC2\nC3\nd\ne', startLine: 2, endLine: 4 });
+  assert.deepEqual(applyLineEdit(s, 2, 4, ''), { source: 'a\ne', startLine: 2, endLine: 2 });
+  assert.equal(applyLineEdit(s, 5, 5, 'E\nF').source, 'a\nb\nc\nd\nE\nF', 'last line');
+  assert.match(applyLineEdit(s, 4, 2, 'x').error, /end must be .* after start/);
+  assert.match(applyLineEdit(s, 6, 6, 'x').error, /only 5 lines/);
+  assert.match(applyLineEdit(s, 0, 1, 'x').error, /start/);
+});
+
+test('scriptSyntaxErrors finds broken classic inline scripts, with their page line', () => {
+  const page = '<p>x</p>\n<script>\nlet ok = 1;\n</script>\n<script>\nlist.sort(a=>a[0]-b=>0);\n</script>';
+  const errs = scriptSyntaxErrors(page);
+  assert.equal(errs.length, 1);
+  assert.equal(errs[0].line, 5, 'line of the <script> tag');
+  assert.ok(errs[0].message.length > 0);
+  assert.deepEqual(scriptSyntaxErrors('<script>let ok = 1;</script>'), []);
+});
+
+test('scriptSyntaxErrors skips modules, JSON/templates, external scripts, and never runs code', () => {
+  globalThis.__ran = false;
+  const page = [
+    '<script type="module">import x from "./x.js"; export default 1;</script>',
+    '<script type="application/json">{"a": </script>',
+    '<script src="https://cdn.example/lib.js"></script>',
+    '<script>globalThis.__ran = true;</script>',
+  ].join('\n');
+  assert.deepEqual(scriptSyntaxErrors(page), []);
+  assert.equal(globalThis.__ran, false, 'compiled, not executed');
+});
 
 const src = '<h1>Title</h1>\n<p>one</p>\n<p>two</p>\n<script>\n  let n = 1;\n</script>';
 

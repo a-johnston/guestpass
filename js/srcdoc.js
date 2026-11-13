@@ -68,6 +68,11 @@ const bootstrap = (kvJson) => `<script ${BOOTSTRAP_MARKER}>(function () {
   window.kv = {
     get: function (key) { return key in data ? clone(data[key]) : undefined; },
     set: function (key, value) {
+      /* set({a: 1, b: 2}) sets each key: a common slip that otherwise silently stores nothing. */
+      if (arguments.length === 1 && key && typeof key === 'object') {
+        Object.keys(key).forEach(function (k) { window.kv.set(k, key[k]); });
+        return;
+      }
       if (value === undefined) return window.kv.delete(key);
       value = clone(value);
       apply(key, value, false);

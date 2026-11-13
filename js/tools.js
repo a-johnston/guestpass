@@ -7,7 +7,7 @@
 // fixed tool wrapper). Facts shared by all pages live once in the hint; descriptions state only
 // what a model can't infer. Measure before growing them.
 import { getFrame, settle, formatLogs, patchFrame, updateKv } from './frames.js';
-import { applyEdit, numberLines } from './source.js';
+import { applyEdit, applyLineEdit, numberLines, scriptSyntaxErrors } from './source.js';
 
 const idParam = { type: 'string', description: 'Page id' };
 const htmlParam = { type: 'string', description: 'Fragment or full document' };
@@ -35,24 +35,29 @@ export const TOOL_DEFS = [
   fn('kv', 'Read the shared store, optionally setting keys first (null deletes). Returns the whole store.', {
     set: { type: 'object' },
   }),
-  fn('edit', "Replace text in a page's source and reload it. old must match exactly once.", {
+  fn('edit', "Replace text in a page's source and reload it: old must match exactly once, or give start/end to replace those lines. Edits that would break a script are rejected.", {
     id: idParam,
     old: { type: 'string' },
     new: { type: 'string' },
-  }, ['id', 'old', 'new']),
+    start: { type: 'integer' },
+    end: { type: 'integer' },
+  }, ['id', 'new']),
   fn('read', "A page's current source with line numbers. Without id, lists open pages.", {
     id: idParam,
     start: { type: 'integer' },
     end: { type: 'integer' },
   }),
   fn('close', 'Close a page.', { id: idParam }, ['id']),
-  fn('read_console', "A page's logged console output since it rendered.", { id: idParam }, ['id']),
+  fn('read_console', "A page's console output that you haven't seen yet.", {
+    id: idParam,
+    wait: { type: 'integer', description: 'ms to wait for new output (max 5000)' },
+  }, ['id']),
 ];
 
 export const TOOL_SYSTEM_HINT = 'Your tools can render web pages here: use them when a visual or interactive result helps. ' +
   'Pages are sandboxed iframes: no storage or access to the chat; CDN scripts work. ' +
   "fetch() only reaches CORS-enabled servers: if blocked, don't retry. " +
-  'In pages: kv is a store shared live by all pages and the kv tool (get, set, delete, all; subscribe((k, v) => …) fires on every change). ' +
+  'In pages: kv is a store shared live by all pages and the kv tool (get(k), set(k, v), delete(k), all(); subscribe((k, v) => …) fires on every change). ' +
   'Defining window.onPatch = (data) => result lets the patch tool update a page in place. ' +
   'Inline and pane pages share one id namespace: reusing an id replaces the existing one. ' +
   'Each page is a single-file app: build large ones incrementally, starting small and then using edit. ' +
@@ -78,6 +83,8 @@ function checkHtml(html) {
 }
 
 const MAX_RESULT_CHARS = 8000;
+const MAX_READ_CHARS = 20000; // ~5k tokens: most single-file apps in one or two reads
+const MAX_CONSOLE_WAIT_MS = 5000;
 let autoId = 0;
 
 /**
@@ -95,7 +102,13 @@ export async function runTool(name, rawArgs, ui) {
   } catch (e) {
     return `Error: arguments were not valid JSON (${e.message}). Call the tool again with valid JSON arguments.`;
   }
-  const consoleOf = (id, since = 0) => formatLogs(getFrame(id)?.logs || [], { onlySince: since });
+  // Console output shown in a tool result counts as read, so read_console then reports only newer lines.
+  const consoleOf = (id, since = 0) => {
+    const f = getFrame(id);
+    if (!f) return '(no console output)';
+    f.readCursor = f.logs.length;
+    return formatLogs(f.logs, { onlySince: since });
+  };
 
   switch (name) {
     case 'inline': {
@@ -140,17 +153,42 @@ export async function runTool(name, rawArgs, ui) {
       return `No widget or pane with id "${id}". Open panes: ${ui.panes.ids().join(', ') || '(none)'}`;
     }
     case 'read_console': {
-      const f = getFrame(sanitizeId(args.id));
+      const id = sanitizeId(args.id);
+      const f = getFrame(id);
       if (!f) return `No widget or pane with id "${args.id}".`;
-      return truncate(formatLogs(f.logs));
+      // Only what's new since the last look (render/edit/patch results count as a look), so
+      // polling a page that reports on a timer isn't buried in old lines. `wait` holds the call
+      // until something new arrives, since output from timers lands after the page has loaded.
+      const waitMs = Math.min(Math.max(Number(args.wait) || 0, 0), MAX_CONSOLE_WAIT_MS);
+      const deadline = Date.now() + waitMs;
+      while (f.logs.length <= (f.readCursor || 0) && Date.now() < deadline && getFrame(id) === f) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const seen = f.readCursor || 0;
+      const fresh = f.logs.slice(seen);
+      f.readCursor = f.logs.length;
+      const note = seen ? `(${seen} earlier line${seen === 1 ? '' : 's'} already read)\n` : '';
+      return truncate(`${note}${fresh.length ? formatLogs(fresh) : `(no new console output${waitMs ? ` after ${waitMs} ms` : ''})`}`);
     }
     case 'edit': {
       const id = sanitizeId(args.id);
       const f = getFrame(id);
       if (!f || !ui.canRerender(id)) return `Error: no widget or pane with id "${id}".`;
-      if (typeof args.old !== 'string' || typeof args.new !== 'string') return 'Error: "old" and "new" must be strings.';
-      const r = applyEdit(f.html, args.old, args.new);
+      if (typeof args.new !== 'string') return 'Error: "new" must be a string.';
+      const byLines = args.old == null && (args.start != null || args.end != null);
+      if (!byLines && typeof args.old !== 'string') return 'Error: give "old" (text to replace) or "start"/"end" (lines to replace).';
+      const r = byLines
+        ? applyLineEdit(f.html, Number(args.start), Number(args.end ?? args.start), args.new)
+        : applyEdit(f.html, args.old, args.new);
       if (r.error) return `Error: ${r.error}.`;
+      // Refuse edits that would leave a script unparseable: the page keeps working and the model
+      // fixes its edit, instead of reloading a broken page and learning from the console.
+      const before = scriptSyntaxErrors(f.html).length;
+      const after = scriptSyntaxErrors(r.source);
+      if (after.length > before) {
+        const e = after[after.length - 1];
+        return `Error: edit not applied, it would break the <script> at line ${e.line}: ${e.message}. The page is unchanged.`;
+      }
       ui.rerender(id, r.source);
       await settle(id);
       const where = r.startLine === r.endLine ? `line ${r.startLine}` : `lines ${r.startLine}-${r.endLine}`;
@@ -167,14 +205,34 @@ export async function runTool(name, rawArgs, ui) {
       const id = sanitizeId(args.id);
       const f = getFrame(id);
       if (!f) return `Error: no widget or pane with id "${id}". Open pages: ${ui.listPages().map((p) => p.id).join(', ') || '(none)'}`;
-      const out = numberLines(f.html, args.start, args.end);
-      return out.length > MAX_RESULT_CHARS
-        ? `${out.slice(0, MAX_RESULT_CHARS)}\n… (truncated; read a smaller range with start/end)`
-        : out;
+      return readSource(f.html, args.start, args.end);
     }
     default:
       return `Error: unknown tool "${name}".`;
   }
+}
+
+/**
+ * Numbered source for read: says where it is in the file, and if it must stop early (to keep a
+ * single result from flooding the context) it stops at a line boundary and says where to resume.
+ */
+function readSource(html, start, end) {
+  const total = html.split('\n').length;
+  const from = Math.max(1, Math.floor(start) || 1);
+  if (from > total) return `(the page has only ${total} lines)`;
+  const to = Math.min(total, Math.floor(end) || total);
+  const lines = numberLines(html, from, to).split('\n');
+  const kept = [];
+  let size = 0;
+  for (const line of lines) {
+    if (size + line.length + 1 > MAX_READ_CHARS && kept.length) break;
+    kept.push(line);
+    size += line.length + 1;
+  }
+  const shownTo = from + kept.length - 1;
+  const header = `Lines ${from}-${shownTo} of ${total}`;
+  const more = shownTo < to ? `\n… stopped at line ${shownTo} to limit size; continue with start=${shownTo + 1}` : '';
+  return `${header}\n${kept.join('\n')}${more}`;
 }
 
 function truncate(s) {

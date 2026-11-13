@@ -37,6 +37,45 @@ export function applyEdit(source, oldText, newText) {
   return loose ? { source: updated, startLine, endLine, loose } : { source: updated, startLine, endLine };
 }
 
+/**
+ * Replaces lines start..end (1-based, inclusive) with `newText`; empty `newText` deletes them.
+ * Lets a model make structural edits (drop a block, rewrite a function) by the line numbers `read`
+ * shows, without quoting the old text. Returns {source, startLine, endLine} or {error}.
+ */
+export function applyLineEdit(source, start, end, newText) {
+  const lines = source.split('\n');
+  if (!Number.isInteger(start) || start < 1) return { error: 'start must be a line number (1 or more)' };
+  if (!Number.isInteger(end) || end < start) return { error: 'end must be a line number at or after start' };
+  if (start > lines.length) return { error: `the page has only ${lines.length} lines` };
+  const last = Math.min(end, lines.length);
+  const replacement = newText === '' ? [] : newText.replace(/\n$/, '').split('\n');
+  lines.splice(start - 1, last - start + 1, ...replacement);
+  return { source: lines.join('\n'), startLine: start, endLine: start + Math.max(0, replacement.length - 1) };
+}
+
+/**
+ * Syntax errors in the page's classic inline scripts, as [{line, message}] where `line` is the
+ * page line of the <script> tag. Each script is compiled with `new Function`, which parses but
+ * never runs it. Module, JSON/template, and external scripts are skipped (Function can't parse
+ * import/export, and the others aren't JavaScript to check).
+ */
+export function scriptSyntaxErrors(source) {
+  const errors = [];
+  const re = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+  for (const m of source.matchAll(re)) {
+    const attrs = m[1];
+    if (/\bsrc\s*=/i.test(attrs)) continue;
+    const type = (/\btype\s*=\s*["']?([^"'\s>]+)/i.exec(attrs) || [])[1]?.toLowerCase();
+    if (type && !/^(text|application)\/(java|ecma)script$/.test(type)) continue;
+    try {
+      new Function(m[2]); // eslint-disable-line no-new-func -- compile only
+    } catch (e) {
+      if (e instanceof SyntaxError) errors.push({ line: source.slice(0, m.index).split('\n').length, message: e.message });
+    }
+  }
+  return errors;
+}
+
 /** `text` as a regex where every run of whitespace matches any run of whitespace. */
 function looseRegExp(text) {
   const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
