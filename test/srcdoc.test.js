@@ -53,3 +53,9 @@ test('bootstrap answers screenshot requests', () => {
   assert.match(doc, /m\.type === 'screenshot'/);
   assert.match(doc, /screenshot-result/);
 });
+
+test('screenshots warm up WebKit before the render that is kept', () => {
+  // Safari leaves canvases and images blank in the first SVG render; Chromium needs one pass.
+  const doc = buildSrcdoc('<p>x</p>');
+  assert.match(doc, /var passes = webkit \? 3 : 1;/);
+});

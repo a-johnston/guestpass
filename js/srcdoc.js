@@ -100,7 +100,14 @@ const bootstrap = (kvJson) => `<script ${BOOTSTRAP_MARKER}>(function () {
       try {
         if (typeof window.htmlToImage === 'undefined') (0, eval)(m.lib);
         var de = document.documentElement;
-        window.htmlToImage.toCanvas(de, { pixelRatio: 1, width: de.scrollWidth, height: de.scrollHeight }).then(function (full) {
+        var opts = { pixelRatio: 1, width: de.scrollWidth, height: de.scrollHeight };
+        /* WebKit leaves canvases and images blank in its first renders of the SVG; the third is complete. */
+        var webkit = /AppleWebKit/.test(navigator.userAgent) && !/Chrome|Chromium|Edg|Android/.test(navigator.userAgent);
+        var passes = webkit ? 3 : 1;
+        var render = function () { return window.htmlToImage.toCanvas(de, opts); };
+        var shot = render();
+        for (var i = 1; i < passes; i++) shot = shot.then(render);
+        shot.then(function (full) {
           try {
             var c = full;
             if (m.viewport) {
