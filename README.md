@@ -16,6 +16,7 @@ A static, no-build chat front-end for any OpenAI-compatible server with tool cal
 
   Console output and errors are captured and returned as the tool result, so the model can fix its own code. Fenced ```` ```html ```` blocks also get Run and Open-in-pane buttons, for models without tool support.
 - No localStorage, sessionStorage or cookies. Reloading the page is how you clear the chat. Bookmark a link to reuse it.
+- Cmd/Ctrl+S saves the conversation as `session.md`, including tool calls and the HTML they rendered, but never the server URL or API key.
 
 ## Security model
 

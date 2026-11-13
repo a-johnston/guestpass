@@ -4,6 +4,7 @@ import { TOOL_DEFS, TOOL_SYSTEM_HINT, runTool } from './tools.js';
 import { createFrame, removeFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
+import { sessionToMarkdown } from './session.js';
 
 const MAX_TOOL_ROUNDS = 10;
 const PROMPT_MAX_PX = 240;
@@ -78,6 +79,7 @@ function init() {
   wireComposer();
   wireLayout();
   wireScrollFollow();
+  wireSaveShortcut();
   connect();
   el.prompt.focus();
 }
@@ -647,6 +649,27 @@ function widgetCard({ id, title, html, height }) {
 function truncate(s, n) {
   s = String(s ?? '');
   return s.length > n ? `${s.slice(0, n)}… (${s.length - n} more chars)` : s;
+}
+
+// ---------------------------------------------------------------- save (Cmd/Ctrl+S)
+
+function wireSaveShortcut() {
+  // Only reaches us when focus is in this page; keys pressed inside a widget or pane frame stay there.
+  window.addEventListener('keydown', (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 's') return;
+    e.preventDefault(); // never fall through to the browser's "Save Page As"
+    if (state.messages.length) saveSession();
+  });
+}
+
+function saveSession() {
+  const md = sessionToMarkdown(state.messages, { model: state.cfg.model, system: state.cfg.system });
+  const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: 'session.md' });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // ---------------------------------------------------------------- layout: panes + resizer
