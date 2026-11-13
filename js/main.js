@@ -232,10 +232,9 @@ function updateShareLink() {
 function wireSetup() {
   const form = $('setup-form');
   form.addEventListener('input', updateShareLink);
-  // `change` fires on blur/commit, so typing a URL doesn't spam requests.
+  // Checked automatically: `change` fires on blur/commit, so typing a URL doesn't spam requests.
   $('cfg-baseurl').addEventListener('change', refreshModels);
   $('cfg-apikey').addEventListener('change', refreshModels);
-  $('cfg-test').addEventListener('click', refreshModels);
 
   $('copy-share').addEventListener('click', async () => {
     const input = $('share-link');
