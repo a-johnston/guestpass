@@ -6,6 +6,9 @@
 --no-tools rejects any request carrying `tools`, like llama-server without --jinja.
 
 Scripted behaviour, keyed off the last user message:
+  call:{"name": "...", "args": {...}}
+                    -> emits exactly that tool call (drive any tool from the chat box)
+  contains "slow"   -> streams reasoning for ~3s before answering (for queue/steering tests)
   contains "pane"   -> calls open_pane with a small canvas app (logs one console.error)
   contains "inline" -> calls render_inline with an SVG
   contains "think"  -> streams reasoning_content before the answer
@@ -127,17 +130,27 @@ class Handler(BaseHTTPRequestHandler):
     def respond(self, msgs, has_tools):
         last = msgs[-1] if msgs else {}
         user = next((m.get("content") or "" for m in reversed(msgs) if m.get("role") == "user"), "")
+        key = user.split("\n\n")[-1]  # the client merges queued messages into one user turn
         if last.get("role") == "tool":
             self.stream_text("Done. The tool reported:\n\n```\n" + last.get("content", "") + "\n```")
-        elif has_tools and "pane" in user.lower():
+        elif has_tools and key.startswith("call:"):
+            spec = json.loads(key[5:])
+            self.tool_call(spec["name"], spec.get("args", {}))
+            return self.end_stream()
+        elif "slow" in key.lower():
+            for i in range(30):
+                self.emit(chunk({"reasoning_content": f"step {i}... "}))
+                time.sleep(0.1)
+            self.stream_text(f"You said: **{user}**")
+        elif has_tools and "pane" in key.lower():
             self.stream_text("Opening a pane for you.")
             self.tool_call("open_pane", {"id": "bouncer", "title": "Bouncer", "html": PANE_HTML})
             return self.end_stream()
-        elif has_tools and "inline" in user.lower():
+        elif has_tools and "inline" in key.lower():
             self.tool_call("render_inline", {"title": "SVG demo", "html": INLINE_HTML})
             return self.end_stream()
         else:
-            if "think" in user.lower():
+            if "think" in key.lower():
                 self.stream_text("Let me consider this carefully... ok.", field="reasoning_content")
             self.stream_text(
                 f"You said: **{user}**\n\n| tools sent | messages |\n|---|---|\n| {has_tools} | {len(msgs)} |\n\n"

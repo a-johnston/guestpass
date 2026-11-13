@@ -1,10 +1,13 @@
 // Builds the srcdoc for sandboxed frames. A small bootstrap script is injected before any
-// model-authored code so console output, errors, load, and size changes are reported to the
-// parent page via postMessage. Pure string work, so it is unit tested under Node.
+// model-authored code. It:
+//   - reports console output, errors, load, and size changes to the parent via postMessage
+//   - exposes `window.kv`, a key/value store shared by every frame (seeded from `kv` here)
+//   - calls `window.onPatch(data)` when the parent sends a patch, returning its result
+// Pure string work, so it is unit tested under Node.
 
 export const BOOTSTRAP_MARKER = 'data-chat-bridge-bootstrap';
 
-const BOOTSTRAP = `<script ${BOOTSTRAP_MARKER}>(function () {
+const bootstrap = (kvJson) => `<script ${BOOTSTRAP_MARKER}>(function () {
   function send(m) { m.__chatBridge = 1; try { parent.postMessage(m, '*'); } catch (e) {} }
   function fmt(a) {
     try {
@@ -13,6 +16,8 @@ const BOOTSTRAP = `<script ${BOOTSTRAP_MARKER}>(function () {
       return String(a);
     } catch (e) { return String(a); }
   }
+  function clone(v) { return v === undefined ? null : JSON.parse(JSON.stringify(v)); }
+
   ['log', 'info', 'warn', 'error', 'debug'].forEach(function (level) {
     var orig = console[level];
     console[level] = function () {
@@ -33,6 +38,7 @@ const BOOTSTRAP = `<script ${BOOTSTRAP_MARKER}>(function () {
     send({ type: 'console', level: 'error', text: 'Unhandled promise rejection: ' + fmt(e.reason) });
   });
   addEventListener('load', function () { send({ type: 'ready' }); });
+
   var lastH = 0;
   function reportSize() {
     // The <html> box height tracks content (scrollHeight never drops below the viewport, so
@@ -42,11 +48,65 @@ const BOOTSTRAP = `<script ${BOOTSTRAP_MARKER}>(function () {
   }
   if (typeof ResizeObserver === 'function') new ResizeObserver(reportSize).observe(document.documentElement);
   addEventListener('load', reportSize);
+
+  // Shared store. Values must be JSON-serializable. Subscribers fire on every change,
+  // including this page's own, with (key, value); value is undefined when deleted.
+  var data = ${kvJson};
+  var subs = [];
+  function notify(key, value) {
+    subs.slice().forEach(function (fn) { try { fn(key, value); } catch (e) { console.error(e); } });
+  }
+  function apply(key, value, deleted) {
+    if (deleted) delete data[key]; else data[key] = value;
+    notify(key, deleted ? undefined : clone(value));
+  }
+  window.kv = {
+    get: function (key) { return key in data ? clone(data[key]) : undefined; },
+    set: function (key, value) {
+      if (value === undefined) return window.kv.delete(key);
+      value = clone(value);
+      apply(key, value, false);
+      send({ type: 'kv-set', key: String(key), value: value });
+    },
+    delete: function (key) {
+      apply(key, undefined, true);
+      send({ type: 'kv-set', key: String(key), deleted: true });
+    },
+    all: function () { return clone(data); },
+    subscribe: function (fn) {
+      subs.push(fn);
+      return function () { subs = subs.filter(function (f) { return f !== fn; }); };
+    }
+  };
+
+  addEventListener('message', function (e) {
+    var m = e.data;
+    if (e.source !== parent || !m || m.__chatBridge !== 1) return;
+    if (m.type === 'kv') { apply(m.key, m.value, m.deleted); return; }
+    if (m.type === 'patch') {
+      var reply = function (ok, value) { send({ type: 'patch-result', reqId: m.reqId, ok: ok, value: value }); };
+      if (typeof window.onPatch !== 'function') return reply(false, 'window.onPatch is not defined in this page');
+      try {
+        Promise.resolve(window.onPatch(m.data)).then(
+          function (v) { try { reply(true, clone(v)); } catch (err) { reply(true, String(v)); } },
+          function (err) { reply(false, fmt(err)); });
+      } catch (err) { reply(false, fmt(err)); }
+    }
+  });
 })();</script>`;
 
 const FRAGMENT_STYLE = `<style>:root{color-scheme:light dark;font-family:system-ui,-apple-system,sans-serif}body{margin:12px}</style>`;
 
-export function buildSrcdoc(html) {
+/** Serializes the kv snapshot so it can't break out of the inline <script>. */
+export function kvLiteral(kv) {
+  return JSON.stringify(kv ?? {})
+    .replace(/</g, '\\u003c')
+    .replaceAll(String.fromCharCode(0x2028), "\\u2028") // built at runtime: a raw U+2028/2029 in source is a line terminator
+    .replaceAll(String.fromCharCode(0x2029), "\\u2029");
+}
+
+export function buildSrcdoc(html, { kv } = {}) {
+  const BOOTSTRAP = bootstrap(kvLiteral(kv));
   const src = String(html ?? '');
   const head = /<head(\s[^>]*)?>/i.exec(src);
   if (head) return insertAt(src, head.index + head[0].length, BOOTSTRAP);

@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSrcdoc, BOOTSTRAP_MARKER } from '../js/srcdoc.js';
+import { buildSrcdoc, kvLiteral, BOOTSTRAP_MARKER } from '../js/srcdoc.js';
+
+test('kv snapshot is injected and cannot close the script tag', () => {
+  const kv = { evil: '</script><script>alert(1)</script>', n: 1, line: 'a b' };
+  const out = buildSrcdoc('<p>x</p>', { kv });
+  const boot = out.slice(out.indexOf(BOOTSTRAP_MARKER));
+  assert.equal(boot.indexOf('</script>'), boot.lastIndexOf('</script>'), 'only the bootstrap\'s own closing tag');
+  assert.deepEqual(JSON.parse(kvLiteral(kv)), kv, 'escaped literal still round-trips');
+});
 
 const bootIndex = (s) => s.indexOf(BOOTSTRAP_MARKER);
 

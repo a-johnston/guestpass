@@ -117,7 +117,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 .reasoning { margin-bottom: 8px; color: var(--muted); font-size: 13px; }
 .reasoning summary { cursor: pointer; }
-.reasoning-text { white-space: pre-wrap; border-left: 2px solid var(--border); padding-left: 10px; margin-top: 4px; max-height: 300px; overflow-y: auto; }
+.reasoning-text { white-space: pre-wrap; border-left: 2px solid var(--border); padding-left: 10px; margin-top: 4px; }
 
 .notice { font-size: 13px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); }
 .notice.warn { border-color: var(--warn); }
@@ -134,6 +134,16 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .tool-call.running .tool-status { color: var(--accent); }
 .tool-call.has-errors .tool-status { color: var(--warn); }
 .tool-call pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--border); max-height: 240px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
+.tool-call.superseded .tool-target { text-decoration: line-through; }
+/* Keep the scrollbar visible on these boxes. Chromium/Safari honour custom scrollbars;
+   Firefox only gets a colour hint and may still overlay-hide it (macOS "show scroll bars:
+   automatically"). */
+.tool-call pre::-webkit-scrollbar { width: 10px; height: 10px; }
+.tool-call pre::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 5px; border: 2px solid var(--surface); }
+.tool-call pre::-webkit-scrollbar-track { background: var(--surface-2); }
+@supports not selector(::-webkit-scrollbar) {
+  .tool-call pre { scrollbar-color: var(--muted) var(--surface-2); }
+}
 
 .widget { margin: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
 .widget figcaption { display: flex; align-items: center; padding: 4px 6px 4px 12px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--border); }
@@ -142,8 +152,16 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ---------- composer */
 #composer { display: flex; gap: 8px; padding: 10px 16px 14px; width: 100%; max-width: 892px; margin: 0 auto; align-items: flex-end; }
-#prompt { flex: 1; resize: none; padding: 10px 12px; border-radius: 12px; min-height: 44px; max-height: 240px; }
-#send-btn { height: 44px; min-width: 72px; border-radius: 12px; }
+#prompt { flex: 1; resize: none; padding: 10px 12px; border-radius: 12px; min-height: 44px; max-height: 240px; overflow-y: hidden; }
+#send-btn, #stop-btn { height: 44px; min-width: 72px; border-radius: 12px; }
+
+#queue { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 892px; margin: 0 auto; padding: 0 16px; }
+.queued {
+  display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 12px; font-size: 13px;
+  border: 1px dashed var(--border); border-radius: 10px; background: var(--surface);
+}
+.queued-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; flex: none; }
+.queued-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---------- panes */
 #resizer { flex: none; width: 6px; cursor: col-resize; background: var(--border); }

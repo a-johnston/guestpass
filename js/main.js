@@ -1,11 +1,12 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
 import { listModels, streamChat } from './api.js';
 import { TOOL_DEFS, TOOL_SYSTEM_HINT, runTool } from './tools.js';
-import { createFrame } from './frames.js';
+import { createFrame, removeFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
 
 const MAX_TOOL_ROUNDS = 10;
+const PROMPT_MAX_PX = 240;
 const $ = (id) => document.getElementById(id);
 
 // The page has two faces: without a `#c=` link it is a link builder; with one it is the chat.
@@ -17,7 +18,13 @@ const state = {
   toolsSupported: true,
   messages: [],
   busy: false,
-  abort: null,
+  stream: null, // AbortController of the in-flight completion request
+  stopRequested: false, // Stop: end the run
+  interrupt: false, // Send now: end the current stream, then continue with the queue
+  /** Messages typed during a run; delivered at the next model call. @type {{text:string, el:HTMLElement}[]} */
+  queue: [],
+  /** Inline widgets by id, so re-rendering an id replaces the old one. @type {Map<string, {card:HTMLElement, chip:{note:Function}|null}>} */
+  inline: new Map(),
 };
 
 const el = {
@@ -25,6 +32,8 @@ const el = {
   empty: $('empty'),
   prompt: $('prompt'),
   send: $('send-btn'),
+  stop: $('stop-btn'),
+  queue: $('queue'),
   status: $('status'),
   panesShow: $('panes-show'),
   cfgModel: $('cfg-model'),
@@ -178,38 +187,99 @@ function flash(btn, text) {
   setTimeout(() => (btn.textContent = old), 1500);
 }
 
-// ---------------------------------------------------------------- composer
+// ---------------------------------------------------------------- composer + queue
+
+const IDLE_PLACEHOLDER = 'Message…  (Enter to send, Shift+Enter for newline)';
+const BUSY_PLACEHOLDER = 'Queue a message… it is sent at the next step (Esc stops)';
 
 function wireComposer() {
   const form = $('composer');
+  el.prompt.placeholder = IDLE_PLACEHOLDER;
   el.prompt.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       form.requestSubmit();
+    } else if (e.key === 'Escape' && state.busy) {
+      stop();
     }
   });
   el.prompt.addEventListener('input', autosize);
+  el.stop.addEventListener('click', stop);
   form.addEventListener('submit', (e) => {
     e.preventDefault();
-    if (state.busy) { state.abort?.abort(); return; }
     const text = el.prompt.value.trim();
     if (!text) return;
     el.prompt.value = '';
     autosize();
-    sendMessage(text);
+    if (state.busy) {
+      enqueue(text);
+    } else {
+      pushUser(text);
+      runTurn();
+    }
   });
+  autosize();
 }
 
 function autosize() {
-  el.prompt.style.height = 'auto';
-  el.prompt.style.height = `${Math.min(el.prompt.scrollHeight, 240)}px`;
+  const p = el.prompt;
+  p.style.height = 'auto';
+  // scrollHeight excludes the border; with border-box sizing, leaving it out makes the box
+  // 2px short, so the textarea overflows and flashes a scrollbar on every keystroke.
+  const full = p.scrollHeight + (p.offsetHeight - p.clientHeight);
+  p.style.height = `${Math.min(full, PROMPT_MAX_PX)}px`;
+  p.style.overflowY = full > PROMPT_MAX_PX ? 'auto' : 'hidden';
 }
 
 function setBusy(busy) {
   state.busy = busy;
-  el.send.textContent = busy ? 'Stop' : 'Send';
-  el.send.classList.toggle('danger', busy);
+  el.stop.hidden = !busy;
+  el.prompt.placeholder = busy ? BUSY_PLACEHOLDER : IDLE_PLACEHOLDER;
   if (!busy) el.prompt.focus();
+}
+
+function stop() {
+  state.stopRequested = true;
+  state.stream?.abort();
+}
+
+function enqueue(text) {
+  const item = { text, el: h('div', 'queued') };
+  const now = h('button', 'ghost small', 'Send now');
+  now.type = 'button';
+  now.title = 'Interrupt the current response and send queued messages';
+  now.addEventListener('click', () => {
+    state.interrupt = true;
+    state.stream?.abort(); // if tools are running instead, the queue goes out right after them
+  });
+  const del = h('button', 'icon-btn', '×');
+  del.type = 'button';
+  del.title = 'Remove from queue';
+  del.setAttribute('aria-label', 'Remove from queue');
+  del.addEventListener('click', () => {
+    state.queue = state.queue.filter((q) => q !== item);
+    item.el.remove();
+    el.queue.hidden = state.queue.length === 0;
+  });
+  item.el.append(h('span', 'queued-label', 'Queued'), h('div', 'queued-text', text), now, del);
+  state.queue.push(item);
+  el.queue.append(item.el);
+  el.queue.hidden = false;
+}
+
+function takeQueue() {
+  const items = state.queue.splice(0);
+  items.forEach((i) => i.el.remove());
+  el.queue.hidden = true;
+  return items.map((i) => i.text);
+}
+
+/** Adds a user message; consecutive user messages are merged in the API history (some chat templates require alternation). */
+function pushUser(text) {
+  addUserMessage(text);
+  const last = state.messages.at(-1);
+  if (last?.role === 'user') last.content += `\n\n${text}`;
+  else state.messages.push({ role: 'user', content: text });
 }
 
 // ---------------------------------------------------------------- conversation
@@ -236,18 +306,29 @@ function isToolRejection(err) {
   return state.toolsSupported && err.status >= 400 && err.status < 600 && /tool|jinja|function.?call/i.test(err.message);
 }
 
-async function sendMessage(text) {
-  state.messages.push({ role: 'user', content: text });
-  addUserMessage(text);
-  await runTurn();
-}
-
+/**
+ * Runs model calls until the model answers without tool calls and nothing is queued.
+ * Queued messages are added to the history before each call, so they steer the next step.
+ */
 async function runTurn() {
-  const ctrl = new AbortController();
-  state.abort = ctrl;
   setBusy(true);
+  state.stopRequested = false;
+  let rounds = 0;
   try {
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    for (;;) {
+      const queued = takeQueue();
+      if (queued.length) {
+        queued.forEach(pushUser);
+        rounds = 0;
+      }
+      if (rounds++ >= MAX_TOOL_ROUNDS) {
+        notice(`Stopped after ${MAX_TOOL_ROUNDS} consecutive tool rounds. Send a message to continue.`, 'warn');
+        return;
+      }
+
+      const ctrl = new AbortController();
+      state.stream = ctrl;
+      state.interrupt = false;
       const view = createAssistantView();
       let partial = null;
       let result;
@@ -260,48 +341,81 @@ async function runTurn() {
           onUpdate: (p) => { partial = p; view.update(p); },
         });
       } catch (e) {
+        state.stream = null;
         if (e.name === 'AbortError') {
-          if (partial?.content) {
-            state.messages.push({ role: 'assistant', content: partial.content });
-            view.finish(partial, { stopped: true });
-          } else view.remove();
+          // Keep what was said so far; half-streamed tool calls are dropped.
+          const kept = { content: partial?.content || '', reasoning: partial?.reasoning || '', toolCalls: [], finishReason: null };
+          if (kept.content) state.messages.push({ role: 'assistant', content: kept.content });
+          if (kept.content || kept.reasoning) view.finish(kept, { stopped: true });
+          else view.remove();
+          if (state.interrupt && !state.stopRequested) continue;
           return;
         }
         if (isToolRejection(e)) {
           state.toolsSupported = false;
           view.remove();
           notice('This server doesn’t accept tool calls, so widgets and panes are off for this session.', 'warn');
-          round--;
+          rounds--;
           continue;
         }
         view.fail(e, () => { view.remove(); runTurn(); });
         return;
       }
+      state.stream = null;
 
       view.finish(result);
       const msg = { role: 'assistant', content: result.content };
       if (result.toolCalls.length) msg.tool_calls = result.toolCalls;
       state.messages.push(msg);
-      if (!result.toolCalls.length) return;
+      if (!result.toolCalls.length) {
+        if (state.queue.length && !state.stopRequested) continue;
+        return;
+      }
 
       for (const call of result.toolCalls) {
         const chip = view.addToolCall(call);
         let output;
         try {
-          output = await runTool(call.function.name, call.function.arguments, { mountInline: view.mountInline, panes });
+          output = await runTool(call.function.name, call.function.arguments, {
+            mountInline: (w) => mountInlineWidget(view, chip, w),
+            inline: { has: (id) => state.inline.has(id), remove: (id) => removeInlineWidget(id, 'removed') },
+            panes,
+          });
         } catch (e) {
           output = `Error: ${e.message}`;
         }
         chip.done(output);
         state.messages.push({ role: 'tool', tool_call_id: call.id, content: output });
       }
-      if (ctrl.signal.aborted) return;
+      if (state.stopRequested) return;
     }
-    notice(`Stopped after ${MAX_TOOL_ROUNDS} consecutive tool rounds. Send a message to continue.`, 'warn');
   } finally {
-    state.abort = null;
+    state.stream = null;
+    if (state.stopRequested && state.queue.length) {
+      // Stop means stop: hand queued text back for editing instead of sending it.
+      el.prompt.value = [...takeQueue(), el.prompt.value].filter(Boolean).join('\n\n');
+      autosize();
+    }
     setBusy(false);
   }
+}
+
+function mountInlineWidget(view, chip, widget) {
+  if (state.inline.has(widget.id)) removeInlineWidget(widget.id, 'replaced');
+  const card = widgetCard(widget);
+  view.extras.append(card);
+  state.inline.set(widget.id, { card, chip });
+  scrollIfNear();
+}
+
+/** Removes a live inline widget; its tool-call line stays, marked with `reason`. */
+function removeInlineWidget(id, reason) {
+  const entry = state.inline.get(id);
+  if (!entry) return;
+  removeFrame(id);
+  entry.card.remove();
+  entry.chip?.note(reason);
+  state.inline.delete(id);
 }
 
 // ---------------------------------------------------------------- message views
@@ -334,6 +448,12 @@ function notice(text, kind = 'info') {
   append(h('div', `notice ${kind}`, text));
 }
 
+function formatDuration(ms) {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s < 60) return `${s} second${s === 1 ? '' : 's'}`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
 let codeRunCounter = 0;
 
 function decorateCode(pre, code, host) {
@@ -353,9 +473,9 @@ function createAssistantView() {
   const thinking = h('details', 'reasoning');
   thinking.hidden = true;
   thinking.open = true;
-  thinking.append(h('summary', null, 'Thinking'));
+  const thinkingSummary = h('summary', null, 'Thinking…');
   const thinkingText = h('div', 'reasoning-text');
-  thinking.append(thinkingText);
+  thinking.append(thinkingSummary, thinkingText);
   const body = h('div', 'md');
   const extras = h('div', 'extras');
   root.append(thinking, body, extras);
@@ -363,32 +483,55 @@ function createAssistantView() {
   let latest = null;
   let scheduled = false;
   let finished = false;
+  let thinkStart = 0;
+  let thinkEnd = 0;
+
+  const trackThinking = (p) => {
+    const now = performance.now();
+    if (p.reasoning && !thinkStart) thinkStart = now;
+    if (thinkStart && !thinkEnd && (p.content || p.toolCalls.length)) thinkEnd = now;
+  };
+  const updateThinkingSummary = () => {
+    thinkingSummary.textContent = thinkEnd ? `Thought for ${formatDuration(thinkEnd - thinkStart)}` : 'Thinking…';
+  };
+
   const render = () => {
     scheduled = false;
     if (!latest || finished) return;
-    if (latest.reasoning) { thinking.hidden = false; thinkingText.textContent = latest.reasoning; }
+    if (latest.reasoning) {
+      thinking.hidden = false;
+      thinkingText.textContent = latest.reasoning;
+      if (thinkEnd && thinking.open && !thinking.dataset.userToggled) thinking.open = false;
+      updateThinkingSummary();
+    }
     renderMarkdown(body, latest.content);
     const pendingCalls = latest.toolCalls.map((c) => c.function.name).filter(Boolean);
     root.dataset.calling = pendingCalls.length ? `Preparing ${pendingCalls.join(', ')}…` : '';
     if (latest.content || latest.reasoning || pendingCalls.length) root.classList.remove('pending');
     scrollIfNear();
   };
+  thinking.querySelector('summary').addEventListener('click', () => { thinking.dataset.userToggled = '1'; });
 
   return {
+    extras,
     update(p) {
       latest = p;
+      trackThinking(p);
       if (!scheduled) { scheduled = true; requestAnimationFrame(render); }
     },
     finish(p, { stopped = false } = {}) {
       latest = p;
+      trackThinking(p);
+      if (thinkStart && !thinkEnd) thinkEnd = performance.now();
       render();
       finished = true; // a still-queued animation-frame render must not overwrite the final one
       root.classList.remove('pending');
       root.dataset.calling = '';
-      thinking.open = false;
+      if (!thinking.dataset.userToggled) thinking.open = false;
+      updateThinkingSummary();
       renderMarkdown(body, p.content, (pre, code) => decorateCode(pre, code, extras));
       if (!p.content && !p.reasoning && !p.toolCalls.length) body.append(h('em', 'muted', '(empty response)'));
-      if (stopped) body.append(h('div', 'muted small', '— stopped'));
+      if (stopped) body.append(h('div', 'muted small', '— interrupted'));
       if (p.finishReason === 'length') body.append(h('div', 'muted small', '— cut off (max tokens reached)'));
     },
     addToolCall(call) {
@@ -397,23 +540,30 @@ function createAssistantView() {
       const sum = h('summary');
       let args = {};
       try { args = JSON.parse(call.function.arguments || '{}'); } catch {}
-      sum.append(h('span', 'tool-name', call.function.name), h('span', 'tool-target', args.title || args.id || ''), h('span', 'tool-status', 'running…'));
+      const status = h('span', 'tool-status', 'running…');
+      sum.append(h('span', 'tool-name', call.function.name), h('span', 'tool-target', args.title || args.id || ''), status);
       const argPre = h('pre', 'tool-args', truncate(call.function.arguments, 4000));
       const outPre = h('pre', 'tool-output');
       d.append(sum, argPre, outPre);
       extras.append(d);
       scrollIfNear();
+      let base = '';
       return {
         done(output) {
           d.classList.remove('running');
           const failed = /^Error:|\[error\]/m.test(output);
           d.classList.toggle('has-errors', failed);
-          sum.querySelector('.tool-status').textContent = failed ? 'done · errors' : 'done';
+          base = failed ? 'done · errors' : 'done';
+          status.textContent = base;
           outPre.textContent = output;
+        },
+        /** Marks the call's widget as gone (replaced/removed) while keeping the line. */
+        note(text) {
+          d.classList.add('superseded');
+          status.textContent = `${base || 'done'} · ${text}`;
         },
       };
     },
-    mountInline: (widget) => { extras.append(widgetCard(widget)); scrollIfNear(); },
     fail(err, retry) {
       root.classList.remove('pending');
       root.classList.add('error');
