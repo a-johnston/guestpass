@@ -21,17 +21,13 @@
       <label>API key
         <input id="cfg-apikey" type="password" placeholder="optional" autocomplete="off" />
       </label>
-      <label>Model
-        <select id="cfg-model"><option value="">Server default</option></select>
-        <small>Filled from the server once the URL and key are entered.</small>
-      </label>
       <label>System prompt
         <textarea id="cfg-system" rows="3" placeholder="optional"></textarea>
       </label>
       <p id="cfg-status" class="hint" role="status"></p>
       <fieldset class="share">
         <legend>Link</legend>
-        <p class="hint">Contains the URL, key, model and system prompt. Anyone with it can use the server.</p>
+        <p class="hint">Contains the URL, key and system prompt. Anyone with it can use the server. Chats use the first model the server lists.</p>
         <div class="row">
           <input id="share-link" readonly aria-label="Link" />
           <button type="button" id="copy-share">Copy</button>

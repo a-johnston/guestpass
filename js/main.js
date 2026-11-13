@@ -36,7 +36,6 @@ const el = {
   queue: $('queue'),
   status: $('status'),
   panesShow: $('panes-show'),
-  cfgModel: $('cfg-model'),
   cfgStatus: $('cfg-status'),
   resizer: $('resizer'),
   aside: $('panes'),
@@ -87,9 +86,9 @@ async function connect() {
   const { baseUrl, apiKey } = state.cfg;
   try {
     const models = await listModels({ baseUrl, apiKey });
-    // With no model chosen, the field is omitted and the server picks; but some servers (Ollama)
-    // require one, so fill it in when the choice is unambiguous.
-    if (!state.cfg.model && models.length === 1) state.cfg.model = models[0];
+    // Links don't carry a model (it made them long); use the server's first one. If the server
+    // lists none, the field is omitted and the server picks.
+    state.cfg.model = models[0] || '';
     setStatus('ok', `Connected${state.cfg.model ? ` · ${state.cfg.model}` : ''}`);
   } catch (e) {
     // Some servers have no /models endpoint; chat may still work, so don't block.
@@ -110,16 +109,8 @@ function readSetupForm() {
   return {
     baseUrl: normalizeBaseUrl($('cfg-baseurl').value),
     apiKey: $('cfg-apikey').value.trim(),
-    model: el.cfgModel.value,
     system: $('cfg-system').value,
   };
-}
-
-function setModelOptions(models, selected) {
-  const options = [new Option('Server default', '')];
-  for (const m of models) options.push(new Option(m, m, false, m === selected));
-  el.cfgModel.replaceChildren(...options);
-  el.cfgModel.value = models.includes(selected) ? selected : models.length === 1 ? models[0] : '';
 }
 
 function showSetupStatus(kind, text) {
@@ -136,8 +127,8 @@ async function refreshModels() {
   try {
     const models = await listModels(cfg);
     if (req !== modelsRequest) return;
-    setModelOptions(models, cfg.model);
-    showSetupStatus('ok', `Connected — ${models.length} model${models.length === 1 ? '' : 's'} available.`);
+    const using = models.length ? ` Chats will use ${models[0]}${models.length > 1 ? ' (the first listed)' : ''}.` : '';
+    showSetupStatus('ok', `Connected — ${models.length} model${models.length === 1 ? '' : 's'} available.${using}`);
   } catch (e) {
     if (req !== modelsRequest) return;
     showSetupStatus('error', e.message);

@@ -2,41 +2,52 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { encodeConfig, decodeConfig, readShareFromHash, normalizeBaseUrl, buildShareLink } from '../js/config.js';
 
-test('round-trips a config including non-ASCII text', () => {
-  const cfg = { v: 1, baseUrl: 'https://llm.example.com:8443/v1', apiKey: 'sk-abc', model: 'qwen', system: 'Réponds en français 🙂' };
+const b64 = (s) => Buffer.from(s).toString('base64url');
+
+test('payload is "baseUrl apiKey" as unpadded base64url', () => {
+  const enc = encodeConfig({ baseUrl: 'https://box.tail1234.ts.net:8443/v1', apiKey: 'sk-abc123' });
+  assert.equal(Buffer.from(enc, 'base64url').toString(), 'https://box.tail1234.ts.net:8443/v1 sk-abc123');
+  assert.match(enc, /^[A-Za-z0-9_-]+$/, 'no +, /, or = padding');
+});
+
+test('trailing empty fields are omitted', () => {
+  assert.equal(Buffer.from(encodeConfig({ baseUrl: 'https://x/v1' }), 'base64url').toString(), 'https://x/v1');
+  assert.equal(Buffer.from(encodeConfig({ baseUrl: 'https://x/v1', apiKey: '', system: 'hi' }), 'base64url').toString(), 'https://x/v1  hi');
+});
+
+test('round-trips, including a system prompt with spaces and non-ASCII', () => {
+  const cfg = { baseUrl: 'https://x:1/v1', apiKey: 'sk-1', system: 'Réponds en français, s’il te plaît 🙂' };
   assert.deepEqual(decodeConfig(encodeConfig(cfg)), cfg);
+  assert.deepEqual(decodeConfig(encodeConfig({ baseUrl: 'https://x/v1', system: 'a b' })), { baseUrl: 'https://x/v1', apiKey: '', system: 'a b' });
+  assert.deepEqual(decodeConfig(encodeConfig({ baseUrl: 'https://x/v1' })), { baseUrl: 'https://x/v1', apiKey: '', system: '' });
 });
 
-test('encoding is base64url (no +, /, or = padding)', () => {
-  const enc = encodeConfig({ v: 1, baseUrl: 'https://x/v1', apiKey: '???>>>~~~', system: 'ÿÿÿ' });
-  assert.match(enc, /^[A-Za-z0-9_-]+$/);
+test('decodes with or without base64 padding', () => {
+  const padded = Buffer.from('https://x/v1 k').toString('base64');
+  assert.ok(padded.endsWith('='));
+  assert.equal(decodeConfig(padded).apiKey, 'k');
 });
 
-test('readShareFromHash returns null when there is no c param', () => {
+test('rejects garbage and non-http URLs', () => {
+  assert.throws(() => decodeConfig('!!!not-base64!!!'), /malformed/);
+  assert.throws(() => decodeConfig(b64('not a url')), /server URL/);
+  assert.throws(() => decodeConfig(b64('javascript:alert(1) k')), /server URL/);
+  assert.throws(() => decodeConfig(Buffer.from([0xff, 0xfe]).toString('base64url')), /malformed/);
+});
+
+test('readShareFromHash reads the c param', () => {
   assert.equal(readShareFromHash(''), null);
-  assert.equal(readShareFromHash('#'), null);
   assert.equal(readShareFromHash('#other=1'), null);
+  assert.deepEqual(readShareFromHash(`#c=${b64('https://x/v1 k')}`), { baseUrl: 'https://x/v1', apiKey: 'k', system: '' });
 });
 
-test('readShareFromHash decodes the c param among others', () => {
-  const enc = encodeConfig({ v: 1, baseUrl: 'https://x/v1' });
-  assert.deepEqual(readShareFromHash(`#foo=1&c=${enc}`), { v: 1, baseUrl: 'https://x/v1' });
-});
-
-test('decodeConfig rejects garbage and missing baseUrl', () => {
-  assert.throws(() => decodeConfig('!!!not-base64!!!'));
-  assert.throws(() => decodeConfig(encodeConfig({ v: 1 })), /baseUrl/);
-  assert.throws(() => decodeConfig(encodeConfig({ v: 99, baseUrl: 'https://x' })), /version/);
-});
-
-test('normalizeBaseUrl trims slashes and a pasted /chat/completions suffix', () => {
+test('normalizeBaseUrl trims slashes and a pasted endpoint suffix', () => {
   assert.equal(normalizeBaseUrl(' https://x:1/v1/ '), 'https://x:1/v1');
   assert.equal(normalizeBaseUrl('https://x/v1/chat/completions'), 'https://x/v1');
   assert.equal(normalizeBaseUrl('https://x/v1/models'), 'https://x/v1');
 });
 
-test('buildShareLink drops empty optional fields and any existing hash', () => {
-  const link = buildShareLink('https://me.github.io/chat-bridge/#old', { baseUrl: 'https://x/v1', apiKey: '', model: 'm', system: '' });
-  assert.ok(link.startsWith('https://me.github.io/chat-bridge/#c='));
-  assert.deepEqual(readShareFromHash(new URL(link).hash), { v: 1, baseUrl: 'https://x/v1', model: 'm' });
+test('buildShareLink replaces any existing hash', () => {
+  const link = buildShareLink('https://me.github.io/chat-bridge/#old', { baseUrl: 'https://x/v1/', apiKey: 'k' });
+  assert.equal(link, `https://me.github.io/chat-bridge/#c=${b64('https://x/v1 k')}`);
 });
