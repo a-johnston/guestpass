@@ -1,5 +1,5 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
-import { listModels, streamChat, fetchProps, capabilitiesFrom } from './api.js';
+import { listModels, streamChat, fetchProps, fetchStatus, capabilitiesFrom } from './api.js';
 import { toolDefs, TOOL_SYSTEM_HINT, RENDER_TOOLS, omittedHtml, clearedHtml, runTool, sanitizeId } from './tools.js';
 import { createFrame, removeFrame, getFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
@@ -130,7 +130,8 @@ async function connect() {
     setStatus('ok', `Connected${state.cfg.model ? ` · ${state.cfg.model}` : ''}`);
     updatePlaceholder();
     // Capabilities before the first send: they decide how attachments and tools are offered.
-    const caps = capabilitiesFrom(models[0] ?? {}, await fetchProps({ baseUrl, apiKey }));
+    const [props, status] = await Promise.all([fetchProps({ baseUrl, apiKey }), fetchStatus({ baseUrl, apiKey })]);
+    const caps = capabilitiesFrom(models[0] ?? {}, props, status);
     state.caps = { vision: caps.vision, documents: caps.documents, basalt: caps.basalt };
     state.context.max = caps.contextLength;
     updateContext();

@@ -18,6 +18,16 @@ test('documents and basalt come from props.basalt', () => {
   assert.deepEqual([capabilitiesFrom({}, {}).documents, capabilitiesFrom({}, {}).basalt], [false, false]);
 });
 
+test('basalt behind CORS: /v1/status identifies it and its version enables documents', () => {
+  // Browsers can't read basalt's /props (it only sends CORS headers on /v1/*).
+  const caps = capabilitiesFrom({}, null, { service: 'basalt', engine: '0.3.3' });
+  assert.deepEqual([caps.basalt, caps.documents], [true, true]);
+  assert.deepEqual([capabilitiesFrom({}, null, { service: 'basalt', engine: '0.3.10' }).documents], [true]);
+  assert.deepEqual([capabilitiesFrom({}, null, { service: 'basalt', engine: '0.3.2' }).documents], [false], 'older basalt drops file parts silently');
+  assert.deepEqual([capabilitiesFrom({}, null, { service: 'basalt', engine: '1.0.0' }).documents], [true]);
+  assert.deepEqual([capabilitiesFrom({}, null, { service: 'other' }).basalt], [false]);
+});
+
 test('context length: model entry, then props n_ctx', () => {
   assert.equal(capabilitiesFrom({ contextLength: 4096 }, { default_generation_settings: { n_ctx: 8192 } }).contextLength, 4096);
   assert.equal(capabilitiesFrom({ contextLength: null }, { default_generation_settings: { n_ctx: 8192 } }).contextLength, 8192);

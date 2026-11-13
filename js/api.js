@@ -61,20 +61,47 @@ export async function fetchProps({ baseUrl, apiKey }) {
   }
 }
 
+/** basalt's /v1/status: unlike /props, it is under /v1, so basalt sends CORS headers for it. */
+export async function fetchStatus({ baseUrl, apiKey }) {
+  try {
+    const res = await fetch(`${baseUrl}/status`, { headers: headers(apiKey) });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json && typeof json === 'object' ? json : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Basalt reads documents from 0.3.3; before that it dropped file parts without an error. */
+const BASALT_DOCUMENTS_SINCE = [0, 3, 3];
+
+function versionAtLeast(version, min) {
+  const v = String(version ?? '').split('.').map((n) => parseInt(n, 10));
+  for (let i = 0; i < min.length; i++) {
+    const n = Number.isFinite(v[i]) ? v[i] : 0;
+    if (n !== min[i]) return n > min[i];
+  }
+  return true;
+}
+
 /**
- * What the model and server accept, from a /models entry and /props (either may be missing).
- * vision is null when nobody says: callers treat that as "try it".
+ * What the model and server accept, from a /models entry, /props and basalt's /v1/status (any may
+ * be missing; a browser usually can't read basalt's /props). vision is null when nobody says:
+ * callers treat that as "try it".
  */
-export function capabilitiesFrom(model, props) {
+export function capabilitiesFrom(model, props, status = null) {
   let vision = null;
   if (Array.isArray(model?.inputModalities)) vision = model.inputModalities.includes('image');
   else if (typeof props?.modalities?.vision === 'boolean') vision = props.modalities.vision;
   const basaltCaps = props?.basalt?.capabilities;
+  const basaltStatus = status?.service === 'basalt';
   const n = props?.default_generation_settings?.n_ctx;
   return {
     vision,
-    documents: Array.isArray(basaltCaps) && basaltCaps.includes('documents'),
-    basalt: !!props?.basalt,
+    documents: (Array.isArray(basaltCaps) && basaltCaps.includes('documents'))
+      || (basaltStatus && versionAtLeast(status.engine, BASALT_DOCUMENTS_SINCE)),
+    basalt: !!props?.basalt || basaltStatus,
     contextLength: model?.contextLength || (Number.isFinite(n) && n > 0 ? n : null),
   };
 }
