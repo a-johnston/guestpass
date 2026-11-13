@@ -18,7 +18,8 @@ const state = {
   // Optional request features. Each is on until the server rejects a request because of it;
   // then it is dropped for the rest of the session (see FALLBACKS).
   toolsSupported: true,
-  sendReasoning: true, // reasoning_content on assistant messages of the current turn
+  sendReasoning: true, // reasoning_content on assistant messages (see thinkingMode)
+  thinkingMode: 'turn', // 'turn': current turn only; 'all': every turn (options popover)
   requestUsage: true, // stream_options.include_usage, for the context counter
   context: { used: null, max: null },
   messages: [],
@@ -85,6 +86,7 @@ function init() {
   wireLayout();
   wireScrollFollow();
   wireSaveShortcut();
+  wireOptions();
   connect();
   el.prompt.focus();
 }
@@ -328,7 +330,7 @@ function buildRequest() {
   const lastUser = state.messages.findLastIndex((m) => m.role === 'user');
   let history = state.messages.map(({ reasoning, thinkingMs, ...m }, i) => {
     if (m.tool_calls) m.tool_calls = m.tool_calls.map(forServer);
-    if (reasoning && i > lastUser && state.sendReasoning) m.reasoning_content = reasoning;
+    if (reasoning && state.sendReasoning && (state.thinkingMode === 'all' || i > lastUser)) m.reasoning_content = reasoning;
     return m;
   });
   if (!toolsOn) {
@@ -367,12 +369,13 @@ function markSuperseded(id, latest) {
     }
   }
 }
-const RENDER_TOOLS = new Set(['render_inline', 'open_pane']);
 
 /**
  * Optional request features the server may reject. If a request fails with an error mentioning
  * one that's still on, it's switched off for the session and the request retried without it.
  */
+const RENDER_TOOLS = new Set(['render_inline', 'open_pane']);
+
 const FALLBACKS = [
   { key: 'toolsSupported', match: /tool|jinja|function.?call/i, notice: 'This server doesn’t accept tool calls, so widgets and panes are off for this session.' },
   { key: 'sendReasoning', match: /reasoning/i },
@@ -409,7 +412,15 @@ async function runTurn() {
         rounds = 0;
       }
       if (rounds++ >= MAX_TOOL_ROUNDS) {
-        notice(`Stopped after ${MAX_TOOL_ROUNDS} consecutive tool rounds. Send a message to continue.`, 'warn');
+        const n = notice(`Paused after ${MAX_TOOL_ROUNDS} tool rounds in a row. `, 'warn');
+        const more = h('button', 'ghost small', 'Continue');
+        more.type = 'button';
+        more.addEventListener('click', () => {
+          if (state.busy) return;
+          more.remove();
+          runTurn(); // history ends with the last tool results, so this just takes the next step
+        });
+        n.append(more);
         return;
       }
 
@@ -419,13 +430,19 @@ async function runTurn() {
       const view = createAssistantView();
       let partial = null;
       let result;
+      const started = performance.now();
+      let firstToken = 0; // first real output (role-only / empty chunks don't count)
       try {
         result = await streamChat({
           baseUrl: state.cfg.baseUrl,
           apiKey: state.cfg.apiKey,
           body: buildRequest(),
           signal: ctrl.signal,
-          onUpdate: (p) => { partial = p; view.update(p); },
+          onUpdate: (p) => {
+            if (!firstToken && (p.content || p.reasoning || p.toolCalls.length)) firstToken = performance.now();
+            partial = p;
+            view.update(p);
+          },
         });
       } catch (e) {
         state.stream = null;
@@ -456,7 +473,10 @@ async function runTurn() {
         updateContext();
       }
 
-      view.finish(result);
+      const ended = performance.now();
+      view.finish(result, {
+        stats: computeStats({ started, firstToken, ended, usage: result.usage, timings: result.timings }),
+      });
       const msg = withThinking({ role: 'assistant', content: result.content }, result.reasoning, view);
       if (result.toolCalls.length) msg.tool_calls = result.toolCalls;
       state.messages.push(msg);
@@ -559,22 +579,91 @@ function addUserMessage(text) {
 }
 
 function notice(text, kind = 'info') {
-  append(h('div', `notice ${kind}`, text));
+  return append(h('div', `notice ${kind}`, text));
 }
 
 
 let codeRunCounter = 0;
 
-function decorateCode(pre, code, host) {
-  const bar = h('div', 'code-actions');
-  const run = h('button', 'ghost small', '▶ Run');
-  run.type = 'button';
-  run.addEventListener('click', () => host.append(widgetCard({ id: `code-${++codeRunCounter}`, title: 'Code preview', html: code })));
-  const pane = h('button', 'ghost small', '⧉ Open in pane');
-  pane.type = 'button';
-  pane.addEventListener('click', () => { const id = `code-${++codeRunCounter}`; panes.open(id, `Preview ${codeRunCounter}`, code); });
-  bar.append(run, pane);
-  pre.before(bar);
+/**
+ * Always-visible row under a response: Copy (raw markdown) and a stats summary that expands into
+ * a detail line. Rounds that only called tools get stats but no Copy. Returns null if empty.
+ */
+function buildFooter(content, stats) {
+  if (!content && !stats) return null;
+  const row = h('div', 'msg-actions');
+  if (content) {
+    const copy = h('button', 'msg-btn', '⧉ Copy');
+    copy.type = 'button';
+    copy.addEventListener('click', async () => flash(copy, (await copyText(content)) ? 'Copied' : 'Copy failed'));
+    row.append(copy);
+  }
+  if (stats) {
+    const summary = [stats.output != null && `${stats.output.toLocaleString()} tok`, stats.tps && `${stats.tps.toFixed(1)} tok/s`]
+      .filter(Boolean).join(' · ') || `${(stats.total / 1000).toFixed(1)} s`;
+    const btn = h('button', 'msg-btn stats-btn', `ⓘ ${summary}`);
+    btn.type = 'button';
+    btn.setAttribute('aria-expanded', 'false');
+    const detail = h('div', 'stats-detail');
+    detail.hidden = true;
+    detail.textContent = [
+      stats.prompt != null && `Prompt ${stats.prompt.toLocaleString()} tok`,
+      stats.output != null && `Output ${stats.output.toLocaleString()} tok`,
+      stats.ttft != null && `First token ${(stats.ttft / 1000).toFixed(2)} s`,
+      stats.tps && `${stats.tps.toFixed(1)} tok/s${stats.tpsSource === 'server' ? ' (server)' : ''}`,
+      stats.thinking && `Thought ${formatDuration(stats.thinking)}`,
+      `Total ${(stats.total / 1000).toFixed(1)} s`,
+    ].filter(Boolean).join(' · ');
+    btn.addEventListener('click', () => {
+      detail.hidden = !detail.hidden;
+      btn.setAttribute('aria-expanded', String(!detail.hidden));
+    });
+    row.append(btn, detail);
+  }
+  return row;
+}
+
+/**
+ * Timing + token stats for one completion. Token counts come from the server's usage report;
+ * speed prefers the server's own decode rate (llama.cpp-style `timings`), else output tokens over
+ * the time from first token to end as measured here (which includes network jitter).
+ */
+function computeStats({ started, firstToken, ended, usage, timings }) {
+  const output = usage?.completion_tokens ?? null;
+  const serverTps = timings?.predicted_per_second;
+  let tps = null;
+  let tpsSource = null;
+  if (Number.isFinite(serverTps) && serverTps > 0) { tps = serverTps; tpsSource = 'server'; }
+  else if (output && firstToken && ended - firstToken > 50) { tps = output / ((ended - firstToken) / 1000); tpsSource = 'client'; }
+  return {
+    prompt: usage?.prompt_tokens ?? null,
+    output,
+    ttft: firstToken ? firstToken - started : null,
+    tps,
+    tpsSource,
+    thinking: 0, // filled in by the view, which knows when thinking ended
+    total: ended - started,
+  };
+}
+
+/** Wraps a finished code block in a card with a header: language, Copy, and Run/Open for HTML. */
+function decorateCode(pre, code, { lang, runnable }, host) {
+  const card = h('div', 'code-block');
+  const head = h('div', 'code-head');
+  head.append(h('span', 'code-lang', lang));
+  const button = (label, onClick) => {
+    const b = h('button', 'code-btn', label);
+    b.type = 'button';
+    b.addEventListener('click', () => onClick(b));
+    head.append(b);
+  };
+  if (runnable) {
+    button('▶ Run', () => host.append(widgetCard({ id: `code-${++codeRunCounter}`, title: 'Code preview', html: code })));
+    button('⧉ Open in pane', () => { const id = `code-${++codeRunCounter}`; panes.open(id, `Preview ${codeRunCounter}`, code); });
+  }
+  button('Copy', async (b) => flash(b, (await copyText(code)) ? 'Copied' : 'Copy failed'));
+  pre.replaceWith(card);
+  card.append(head, pre);
 }
 
 function createAssistantView() {
@@ -591,6 +680,7 @@ function createAssistantView() {
   let latest = null;
   let scheduled = false;
   let finished = false;
+
   let thinkStart = 0;
   let thinkEnd = 0;
   let ticker = null; // refreshes the live "Thinking for N seconds…" header
@@ -638,28 +728,22 @@ function createAssistantView() {
       trackThinking(p);
       if (!scheduled) { scheduled = true; requestAnimationFrame(render); }
     },
-    finish(p, { stopped = false } = {}) {
+    finish(p, { stopped = false, stats = null } = {}) {
       latest = p;
       trackThinking(p);
       endThinking();
+      if (stats) stats.thinking = thinkStart ? thinkEnd - thinkStart : 0; // exact now that thinking has ended
       render();
       finished = true; // a still-queued animation-frame render must not overwrite the final one
       root.classList.remove('pending');
       root.dataset.calling = '';
       updateThinkingSummary();
-      renderMarkdown(body, p.content, { final: true, decorate: (pre, code) => decorateCode(pre, code, extras) });
+      renderMarkdown(body, p.content, { final: true, decorate: (pre, code, info) => decorateCode(pre, code, info, extras) });
       if (!p.content && !p.reasoning && !p.toolCalls.length) body.append(h('em', 'muted', '(empty response)'));
       if (stopped) body.append(h('div', 'muted small', '— interrupted'));
       if (p.finishReason === 'length') body.append(h('div', 'muted small', '— cut off (max tokens reached)'));
-      if (p.content) {
-        const actions = h('div', 'msg-actions');
-        const copy = h('button', 'ghost small', 'Copy');
-        copy.type = 'button';
-        copy.title = 'Copy this message as markdown';
-        copy.addEventListener('click', async () => flash(copy, (await copyText(p.content)) ? 'Copied' : 'Copy failed'));
-        actions.append(copy);
-        root.append(actions);
-      }
+      const footer = buildFooter(p.content, stats);
+      if (footer) root.append(footer);
     },
     addToolCall(call) {
       root.classList.remove('pending');
@@ -733,6 +817,23 @@ function truncate(s, n) {
 }
 
 // ---------------------------------------------------------------- save (Cmd/Ctrl+S)
+
+// ---------------------------------------------------------------- options popover (⚙)
+
+function wireOptions() {
+  const btn = $('opts-btn');
+  const pop = $('opts');
+  const setOpen = (open) => {
+    pop.hidden = !open;
+    btn.setAttribute('aria-expanded', String(open));
+  };
+  btn.addEventListener('click', (e) => { e.stopPropagation(); setOpen(pop.hidden); });
+  document.addEventListener('click', (e) => { if (!pop.hidden && !pop.contains(e.target)) setOpen(false); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !pop.hidden) { setOpen(false); btn.focus(); } });
+  pop.addEventListener('change', (e) => {
+    if (e.target.name === 'think-mode') state.thinkingMode = e.target.value;
+  });
+}
 
 function wireSaveShortcut() {
   // Only reaches us when focus is in this page; keys pressed inside a widget or pane frame stay there.

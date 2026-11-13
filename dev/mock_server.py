@@ -12,6 +12,8 @@ Scripted behaviour, keyed off the last user message:
   call:{"name": "...", "args": {...}, "think": "optional reasoning"}
                     -> emits exactly that tool call (drive any tool from the chat box)
   contains "code"   -> replies with python, js, and unlabeled code blocks (for highlighting)
+  call:{..., "loop": true}
+                    -> after each tool result, calls another tool (for the round limit)
   contains "long"   -> streams 80 paragraphs over ~4s (for auto-scroll tests)
   contains "slow"   -> streams reasoning for ~3s before answering (for queue/steering tests)
   contains "pane"   -> calls open_pane with a small canvas app (logs one console.error)
@@ -151,7 +153,10 @@ class Handler(BaseHTTPRequestHandler):
         last = msgs[-1] if msgs else {}
         user = next((m.get("content") or "" for m in reversed(msgs) if m.get("role") == "user"), "")
         key = user.split("\n\n")[-1]  # the client merges queued messages into one user turn
-        if last.get("role") == "tool":
+        if last.get("role") == "tool" and has_tools and key.startswith("call:") and json.loads(key[5:]).get("loop"):
+            self.tool_call("kv", {})  # never satisfied: keeps calling tools until the client's round limit
+            return self.end_stream()
+        elif last.get("role") == "tool":
             self.stream_text("Done. The tool reported:\n\n```\n" + last.get("content", "") + "\n```")
         elif has_tools and key.startswith("call:"):
             spec = json.loads(key[5:])

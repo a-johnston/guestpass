@@ -30,7 +30,7 @@ test('accumulator concatenates content and reasoning (both field spellings)', ()
   acc.apply(delta({ reasoning: 'm.' }));
   acc.apply(delta({ content: 'Hel' }));
   acc.apply(delta({ content: 'lo' }, 'stop'));
-  assert.deepEqual(acc.result(), { content: 'Hello', reasoning: 'hmm.', toolCalls: [], finishReason: 'stop', usage: null });
+  assert.deepEqual(acc.result(), { content: 'Hello', reasoning: 'hmm.', toolCalls: [], finishReason: 'stop', usage: null, timings: null });
 });
 
 test('accumulator picks up usage from either placement', () => {

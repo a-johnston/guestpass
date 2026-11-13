@@ -31,6 +31,7 @@ export function createAccumulator() {
   let reasoning = '';
   let finishReason = null;
   let usage = null;
+  let timings = null; // llama.cpp-style server timings (decode speed etc.), if sent
   const toolCalls = [];
 
   const newSlot = () => ({ id: '', type: 'function', function: { name: '', arguments: '' } });
@@ -61,6 +62,7 @@ export function createAccumulator() {
       // OpenAI sends usage in a final chunk with empty `choices`; some servers attach it to the
       // chunk carrying finish_reason instead. Read it before bailing on a missing choice.
       if (chunk?.usage) usage = chunk.usage;
+      if (chunk?.timings) timings = chunk.timings;
       const choice = chunk?.choices?.[0];
       if (!choice) return;
       const d = choice.delta || choice.message || {};
@@ -72,7 +74,7 @@ export function createAccumulator() {
     },
     result() {
       const calls = toolCalls.filter(Boolean).map((tc, i) => ({ ...tc, id: tc.id || `call_${Date.now().toString(36)}_${i}` }));
-      return { content, reasoning, toolCalls: calls, finishReason, usage };
+      return { content, reasoning, toolCalls: calls, finishReason, usage, timings };
     },
   };
 }

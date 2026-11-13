@@ -19,8 +19,8 @@ const RUNNABLE = new Set(['html', 'svg', 'xml']);
  * Renders markdown into `el`.
  *  - final: true once the message is complete. Only then are code blocks syntax-highlighted
  *    (re-highlighting on every streamed token would be wasted work) and decorated.
- *  - decorate(preEl, codeText): called for runnable blocks (```html / ```svg) so the caller
- *    can attach "run" buttons.
+ *  - decorate(preEl, codeText, {lang, runnable}): called for every code block so the caller
+ *    can add a header (language, Copy; Run for ```html / ```svg).
  * Blocks without a language label, or with one highlight.js doesn't know, stay plain:
  * auto-detection guesses wrong often enough to be worse than no colour.
  */
@@ -31,6 +31,6 @@ export function renderMarkdown(el, text, { final = false, decorate } = {}) {
     const lang = (/language-(\S+)/.exec(code.className) || [])[1]?.toLowerCase();
     const source = code.textContent;
     if (lang && hljs.getLanguage(lang)) hljs.highlightElement(code);
-    if (decorate && RUNNABLE.has(lang)) decorate(code.parentElement, source);
+    decorate?.(code.parentElement, source, { lang: lang || '', runnable: RUNNABLE.has(lang) });
   }
 }
