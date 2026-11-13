@@ -32,6 +32,16 @@ test('injects after <html> when a document has no <head>', () => {
   assert.ok(bootIndex(out) > out.indexOf('<html>') && bootIndex(out) < out.indexOf('x()'));
 });
 
+test('injection keeps line numbers: code on line N of the page is still on line N', () => {
+  const lineOf = (doc, needle) => doc.slice(0, doc.indexOf(needle)).split('\n').length;
+  const fragment = '<p>a</p>\n<p>b</p>\n<script>boom()</script>';
+  assert.equal(lineOf(buildSrcdoc(fragment), 'boom()'), 3);
+  const full = '<!doctype html>\n<html>\n<head>\n<title>x</title>\n</head>\n<body>\n<script>bang()</script>';
+  assert.equal(lineOf(buildSrcdoc(full, { kv: { a: 'multi\nline' } }), 'bang()'), 7);
+  const noHead = '<!DOCTYPE html>\n<html>\n<body>\n<script>pow()</script>';
+  assert.equal(lineOf(buildSrcdoc(noHead), 'pow()'), 4);
+});
+
 test('does not mistake <header> for <head>', () => {
   const out = buildSrcdoc('<header>nav</header><main>m</main>');
   assert.ok(bootIndex(out) < out.indexOf('<header>'));

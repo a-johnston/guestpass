@@ -1,12 +1,12 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
 import { listModels, streamChat, contextLengthFromProps } from './api.js';
-import { TOOL_DEFS, TOOL_SYSTEM_HINT, RENDER_TOOLS, runTool, sanitizeId } from './tools.js';
-import { createFrame, removeFrame } from './frames.js';
+import { TOOL_DEFS, TOOL_SYSTEM_HINT, RENDER_TOOLS, omittedHtml, runTool, sanitizeId } from './tools.js';
+import { createFrame, removeFrame, getFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
 import { sessionToMarkdown, formatDuration, formatSeconds } from './session.js';
 
-const MAX_TOOL_ROUNDS = 10;
+const MAX_TOOL_ROUNDS = 25; // granular tools (edit/read) take more rounds; Continue resumes past it
 
 /** One-click prompts on the empty chat; each exercises a different part of the tool set. */
 const STARTER_PROMPTS = [
@@ -429,7 +429,7 @@ function forServer({ superseded, ...call }) {
   if (!superseded) return call;
   let args;
   try { args = JSON.parse(call.function.arguments); } catch { return call; }
-  args.html = `[HTML omitted: replaced by a later render of "${args.id}"]`;
+  args.html = omittedHtml(args.id);
   return { ...call, function: { ...call.function, arguments: JSON.stringify(args) } };
 }
 
@@ -567,6 +567,7 @@ async function runTurn() {
             inline: { has: (id) => state.inline.has(id), remove: (id) => removeInlineWidget(id, 'removed') },
             canRerender: (id) => state.inline.has(id) || panes.has(id),
             rerender: rerenderPage,
+            listPages,
             panes,
           });
         } catch (e) {
@@ -601,6 +602,15 @@ function mountInlineWidget(view, chip, widget) {
   view.extras.append(card);
   state.inline.set(widget.id, { card, chip, widget });
   followScroll();
+}
+
+/** Open pages for read() without an id: widgets, then panes, with their current size. */
+function listPages() {
+  const lines = (id) => (getFrame(id)?.html || '').split('\n').length;
+  return [
+    ...[...state.inline].map(([id, e]) => ({ id, kind: 'inline', title: e.widget?.title || '', lines: lines(id) })),
+    ...panes.ids().map((id) => ({ id, kind: 'pane', title: panes.titleOf(id) || '', lines: lines(id) })),
+  ];
 }
 
 /** Reloads a page with edited source where it already is: a widget keeps its place in the chat. */

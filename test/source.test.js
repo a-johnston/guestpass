@@ -24,6 +24,25 @@ test('applyEdit errors: not found, ambiguous, empty old', () => {
   assert.match(applyEdit(src, '<p>four</p>', 'x').error, /not found/);
   assert.match(applyEdit(src, '<p>', 'x').error, /matches 2 places/);
   assert.match(applyEdit(src, '', 'x').error, /empty/);
+  assert.match(applyEdit(src, '  \n ', 'x').error, /empty/);
+});
+
+test('applyEdit falls back to whitespace-insensitive matching, and says so', () => {
+  const code = 'function f() {\n    let a = 1;\n    return a;\n}';
+  const r = applyEdit(code, 'let a = 1;\n  return a;', 'let a = 2;\n    return a;'); // wrong indentation
+  assert.equal(r.source, 'function f() {\n    let a = 2;\n    return a;\n}');
+  assert.equal(r.loose, true);
+  assert.deepEqual([r.startLine, r.endLine], [2, 3]);
+  assert.equal(applyEdit(code, 'let a = 1;', 'let a = 3;').loose, undefined, 'exact matches are not flagged');
+  assert.match(applyEdit('a  b\na b', 'a   b', 'x').error, /matches 2 places/, 'loose matching still requires uniqueness');
+});
+
+test('applyEdit points at the closest line when nothing matches', () => {
+  const code = 'const speed = 4;\nconst turnRate = 0.05;\nfunction tick() {}';
+  const r = applyEdit(code, 'const turn_rate = 0.05;', 'x');
+  assert.match(r.error, /not found/);
+  assert.match(r.error, /^old text not found \(closest: line 2, "const turnRate = 0\.05;"\); read the page/);
+  assert.doesNotMatch(applyEdit(code, 'zzz qqq', 'x').error, /closest/, 'no hint when nothing is similar');
 });
 
 test('numberLines numbers the whole source or an inclusive 1-based range', () => {

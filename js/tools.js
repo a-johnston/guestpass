@@ -40,11 +40,11 @@ export const TOOL_DEFS = [
     old: { type: 'string' },
     new: { type: 'string' },
   }, ['id', 'old', 'new']),
-  fn('read', "A page's current source with line numbers.", {
+  fn('read', "A page's current source with line numbers. Without id, lists open pages.", {
     id: idParam,
     start: { type: 'integer' },
     end: { type: 'integer' },
-  }, ['id']),
+  }),
   fn('close', 'Close a page.', { id: idParam }, ['id']),
   fn('read_console', "A page's logged console output since it rendered.", { id: idParam }, ['id']),
 ];
@@ -60,6 +60,22 @@ export const TOOL_SYSTEM_HINT = 'Your tools can render web pages here: use them 
 
 /** Tools that render a page (and so can supersede an earlier render of the same id). */
 export const RENDER_TOOLS = new Set(['inline', 'pane']);
+
+/**
+ * What a superseded render's HTML is replaced with in the history sent to the model. Worded so it
+ * can't pass for source: a model once copied the old placeholder back in as a page's HTML.
+ */
+export const OMITTED_MARKER = '[not page source';
+export const omittedHtml = (id) =>
+  `${OMITTED_MARKER}: omitted from history after a later render of "${id}". Use read("${id}") for the current source.]`;
+
+function checkHtml(html) {
+  if (typeof html !== 'string' || !html.trim()) return 'Error: "html" is required.';
+  if (html.includes(OMITTED_MARKER)) {
+    return 'Error: that html contains a history placeholder, not page source. Use read(id) to get the current source.';
+  }
+  return null;
+}
 
 const MAX_RESULT_CHARS = 8000;
 let autoId = 0;
@@ -83,22 +99,25 @@ export async function runTool(name, rawArgs, ui) {
 
   switch (name) {
     case 'inline': {
-      if (typeof args.html !== 'string' || !args.html.trim()) return 'Error: "html" is required.';
+      const bad = checkHtml(args.html);
+      if (bad) return bad;
       const id = sanitizeId(args.id) || `widget-${++autoId}`;
-      const replaced = ui.inline.has(id) || ui.panes.has(id);
-      if (ui.panes.has(id)) ui.panes.close(id);
+      // Never silently swap a page's kind: replacing a pane with a widget lost a whole app once.
+      if (ui.panes.has(id)) return `Error: "${id}" is open as a pane. Use pane to replace it, or close it first.`;
+      const replaced = ui.inline.has(id);
       ui.mountInline({ id, title: args.title, html: args.html, height: args.height });
       await settle(id);
       return `${replaced ? 'Replaced' : 'Rendered'} widget "${id}".\nConsole:\n${consoleOf(id)}`;
     }
     case 'pane': {
-      if (typeof args.html !== 'string' || !args.html.trim()) return 'Error: "html" is required.';
+      const bad = checkHtml(args.html);
+      if (bad) return bad;
       const id = sanitizeId(args.id) || `pane-${++autoId}`;
-      const replaced = ui.panes.has(id) || ui.inline.has(id);
-      if (ui.inline.has(id)) ui.inline.remove(id);
-      ui.panes.open(id, args.title || id, args.html);
+      if (ui.inline.has(id)) return `Error: "${id}" is an inline widget. Use inline to replace it, or close it first.`;
+      const replaced = ui.panes.has(id);
+      ui.panes.open(id, args.title || ui.panes.titleOf(id) || id, args.html);
       await settle(id);
-      return `${replaced ? 'Reloaded' : 'Opened'} pane "${id}".\nConsole:\n${consoleOf(id)}`;
+      return `${replaced ? 'Replaced the source of' : 'Opened'} pane "${id}".\nConsole:\n${consoleOf(id)}`;
     }
     case 'patch': {
       const id = sanitizeId(args.id);
@@ -135,12 +154,19 @@ export async function runTool(name, rawArgs, ui) {
       ui.rerender(id, r.source);
       await settle(id);
       const where = r.startLine === r.endLine ? `line ${r.startLine}` : `lines ${r.startLine}-${r.endLine}`;
-      return `Edited "${id}" (${where}); reloaded.\nConsole:\n${consoleOf(id)}`;
+      const loose = r.loose ? ', matched ignoring whitespace' : '';
+      return `Edited "${id}" (${where}${loose}); reloaded.\nConsole:\n${consoleOf(id)}`;
     }
     case 'read': {
+      if (args.id == null || args.id === '') {
+        const pages = ui.listPages();
+        return pages.length
+          ? pages.map((p) => `${p.id} (${p.kind}${p.title && p.title !== p.id ? `, "${p.title}"` : ''}, ${p.lines} lines)`).join('\n')
+          : '(no open pages)';
+      }
       const id = sanitizeId(args.id);
       const f = getFrame(id);
-      if (!f) return `Error: no widget or pane with id "${id}".`;
+      if (!f) return `Error: no widget or pane with id "${id}". Open pages: ${ui.listPages().map((p) => p.id).join(', ') || '(none)'}`;
       const out = numberLines(f.html, args.start, args.end);
       return out.length > MAX_RESULT_CHARS
         ? `${out.slice(0, MAX_RESULT_CHARS)}\n… (truncated; read a smaller range with start/end)`

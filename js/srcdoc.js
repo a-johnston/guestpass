@@ -11,7 +11,12 @@ const bootstrap = (kvJson) => `<script ${BOOTSTRAP_MARKER}>(function () {
   function send(m) { m.__guestpass = 1; try { parent.postMessage(m, '*'); } catch (e) {} }
   function fmt(a) {
     try {
-      if (a instanceof Error) return a.stack || String(a);
+      if (a instanceof Error || (a && typeof a === 'object' && typeof a.message === 'string' && a.name)) {
+        /* Chrome's stack starts with "Name: message"; Firefox's is frames only, so add it. */
+        var head = a.name + ': ' + a.message;
+        var st = a.stack || '';
+        return st.indexOf(head) === 0 ? st : head + (st ? ' ' + st : '');
+      }
       if (a && typeof a === 'object') return JSON.stringify(a);
       return String(a);
     } catch (e) { return String(a); }
@@ -41,16 +46,16 @@ const bootstrap = (kvJson) => `<script ${BOOTSTRAP_MARKER}>(function () {
 
   var lastH = 0;
   function reportSize() {
-    // The <html> box height tracks content (scrollHeight never drops below the viewport, so
-    // widgets could grow but never shrink).
+    /* The <html> box height tracks content (scrollHeight never drops below the viewport, so
+       widgets could grow but never shrink). */
     var h = Math.ceil(document.documentElement.getBoundingClientRect().height);
     if (Math.abs(h - lastH) > 1) { lastH = h; send({ type: 'resize', height: h }); }
   }
   if (typeof ResizeObserver === 'function') new ResizeObserver(reportSize).observe(document.documentElement);
   addEventListener('load', reportSize);
 
-  // Shared store. Values must be JSON-serializable. Subscribers fire on every change,
-  // including this page's own, with (key, value); value is undefined when deleted.
+  /* Shared store. Values must be JSON-serializable. Subscribers fire on every change,
+     including this page's own, with (key, value); value is undefined when deleted. */
   var data = ${kvJson};
   var subs = [];
   function notify(key, value) {
@@ -106,7 +111,8 @@ export function kvLiteral(kv) {
 }
 
 export function buildSrcdoc(html, { kv } = {}) {
-  const BOOTSTRAP = bootstrap(kvLiteral(kv));
+  // One line, so line numbers in error messages match the page source as written (and as `read` numbers it).
+  const BOOTSTRAP = bootstrap(kvLiteral(kv)).replace(/\n\s*/g, " ");
   const src = String(html ?? '');
   const head = /<head(\s[^>]*)?>/i.exec(src);
   if (head) return insertAt(src, head.index + head[0].length, BOOTSTRAP);

@@ -6,7 +6,8 @@
 // only channel between frames is this page relaying postMessage traffic (kv, patches).
 import { buildSrcdoc } from './srcdoc.js';
 
-const SANDBOX = 'allow-scripts allow-forms allow-modals allow-popups allow-downloads';
+// allow-pointer-lock: games want mouse-look; it needs a user gesture and Esc always releases it.
+const SANDBOX = 'allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-pointer-lock';
 const MAX_LOGS = 200;
 const MAX_LOG_CHARS = 2000;
 const PATCH_TIMEOUT_MS = 5000;
