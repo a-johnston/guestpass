@@ -31,4 +31,4 @@ node --test test/                        # unit tests (share codec, SSE/stream p
 
 The mock server has scripted responses: `call:{"name":"patch","args":{…}}` makes it emit exactly that tool call, "slow" streams ~3s of reasoning (for testing queued messages), "pane" opens a pane, "inline" renders a widget, "think" streams reasoning, and anything else gets echoed back as markdown.
 
-`vendor/` holds pinned copies of marked 12.0.2 and DOMPurify 3.1.6, so the page has no CDN dependency.
+`vendor/` holds pinned copies of marked 12.0.2, DOMPurify 3.1.6 and highlight.js 11.9.0 (common-languages build), so the page has no CDN dependency.

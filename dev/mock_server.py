@@ -8,6 +8,7 @@
 Scripted behaviour, keyed off the last user message:
   call:{"name": "...", "args": {...}}
                     -> emits exactly that tool call (drive any tool from the chat box)
+  contains "code"   -> replies with python, js, and unlabeled code blocks (for highlighting)
   contains "long"   -> streams 80 paragraphs over ~4s (for auto-scroll tests)
   contains "slow"   -> streams reasoning for ~3s before answering (for queue/steering tests)
   contains "pane"   -> calls open_pane with a small canvas app (logs one console.error)
@@ -138,6 +139,11 @@ class Handler(BaseHTTPRequestHandler):
             spec = json.loads(key[5:])
             self.tool_call(spec["name"], spec.get("args", {}))
             return self.end_stream()
+        elif "code" in key.lower():
+            self.stream_text(
+                "Python:\n\n```python\ndef greet(name):\n    # say hi\n    return f\"hi {name}\"\n```\n\n"
+                "JS:\n\n```js\nconst n = 42; // answer\nconsole.log(`n=${n}`);\n```\n\n"
+                "Unlabeled:\n\n```\nplain text block\n```\n")
         elif "long" in key.lower():
             for i in range(80):
                 self.emit(chunk({"content": f"Line {i} of a long answer.\n\n"}))

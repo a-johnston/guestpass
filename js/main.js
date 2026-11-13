@@ -565,7 +565,7 @@ function createAssistantView() {
       root.classList.remove('pending');
       root.dataset.calling = '';
       updateThinkingSummary();
-      renderMarkdown(body, p.content, (pre, code) => decorateCode(pre, code, extras));
+      renderMarkdown(body, p.content, { final: true, decorate: (pre, code) => decorateCode(pre, code, extras) });
       if (!p.content && !p.reasoning && !p.toolCalls.length) body.append(h('em', 'muted', '(empty response)'));
       if (stopped) body.append(h('div', 'muted small', '— interrupted'));
       if (p.finishReason === 'length') body.append(h('div', 'muted small', '— cut off (max tokens reached)'));

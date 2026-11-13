@@ -1,8 +1,10 @@
 // Markdown → sanitized HTML for assistant messages.
 import { marked } from '../vendor/marked.esm.js';
 import DOMPurify from '../vendor/purify.es.mjs';
+import hljs from '../vendor/highlight.min.js';
 
 marked.setOptions({ gfm: true, breaks: false });
+hljs.configure({ ignoreUnescapedHTML: true });
 
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   if (node.tagName === 'A' && node.getAttribute('href')) {
@@ -14,14 +16,21 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
 const RUNNABLE = new Set(['html', 'svg', 'xml']);
 
 /**
- * Renders markdown into `el`. For runnable code blocks (```html / ```svg), calls
- * decorate(preEl, codeText) so the caller can attach "run" buttons.
+ * Renders markdown into `el`.
+ *  - final: true once the message is complete. Only then are code blocks syntax-highlighted
+ *    (re-highlighting on every streamed token would be wasted work) and decorated.
+ *  - decorate(preEl, codeText): called for runnable blocks (```html / ```svg) so the caller
+ *    can attach "run" buttons.
+ * Blocks without a language label, or with one highlight.js doesn't know, stay plain:
+ * auto-detection guesses wrong often enough to be worse than no colour.
  */
-export function renderMarkdown(el, text, decorate) {
+export function renderMarkdown(el, text, { final = false, decorate } = {}) {
   el.innerHTML = DOMPurify.sanitize(marked.parse(text || ''), { FORBID_TAGS: ['style'], FORBID_ATTR: ['style'] });
-  if (!decorate) return;
+  if (!final) return;
   for (const code of el.querySelectorAll('pre > code')) {
     const lang = (/language-(\S+)/.exec(code.className) || [])[1]?.toLowerCase();
-    if (RUNNABLE.has(lang)) decorate(code.parentElement, code.textContent);
+    const source = code.textContent;
+    if (lang && hljs.getLanguage(lang)) hljs.highlightElement(code);
+    if (decorate && RUNNABLE.has(lang)) decorate(code.parentElement, source);
   }
 }

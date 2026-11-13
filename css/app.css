@@ -13,6 +13,17 @@
   --warn: #c98a00;
   --danger: #d23c3c;
   --code-bg: #f3f3f6;
+  /* syntax highlighting (GitHub-like) */
+  --hl-keyword: #cf222e;
+  --hl-string: #0a3069;
+  --hl-number: #0550ae;
+  --hl-comment: #6e7781;
+  --hl-title: #8250df;
+  --hl-attr: #0550ae;
+  --hl-tag: #116329;
+  --hl-meta: #953800;
+  --hl-add-bg: #dafbe1;
+  --hl-del-bg: #ffebe9;
   --pane-width: 50vw;
   --radius: 10px;
   color-scheme: light;
@@ -31,6 +42,16 @@
     --user-bg: #2c4a8f;
     --user-text: #f2f5ff;
     --code-bg: #0c0d10;
+    --hl-keyword: #ff7b72;
+    --hl-string: #a5d6ff;
+    --hl-number: #79c0ff;
+    --hl-comment: #8b949e;
+    --hl-title: #d2a8ff;
+    --hl-attr: #79c0ff;
+    --hl-tag: #7ee787;
+    --hl-meta: #ffa657;
+    --hl-add-bg: #033a16;
+    --hl-del-bg: #67060c;
     color-scheme: dark;
   }
 }
@@ -106,6 +127,20 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
 .md pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow-x: auto; font-size: 13px; }
+
+/* highlight.js token colours; values come from the --hl-* tokens so light/dark follow the app */
+.hljs-keyword, .hljs-doctag, .hljs-template-tag, .hljs-type, .hljs-variable.language_, .hljs-selector-tag { color: var(--hl-keyword); }
+.hljs-string, .hljs-regexp, .hljs-meta .hljs-string, .hljs-char.escape_ { color: var(--hl-string); }
+.hljs-number, .hljs-literal, .hljs-built_in, .hljs-symbol, .hljs-variable, .hljs-template-variable, .hljs-operator { color: var(--hl-number); }
+.hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
+.hljs-title, .hljs-title.class_, .hljs-title.function_, .hljs-section { color: var(--hl-title); }
+.hljs-attr, .hljs-attribute, .hljs-property, .hljs-params, .hljs-selector-attr, .hljs-selector-class, .hljs-selector-id, .hljs-selector-pseudo { color: var(--hl-attr); }
+.hljs-tag, .hljs-name, .hljs-bullet { color: var(--hl-tag); }
+.hljs-meta, .hljs-meta .hljs-keyword { color: var(--hl-meta); }
+.hljs-addition { background: var(--hl-add-bg); }
+.hljs-deletion { background: var(--hl-del-bg); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
 .md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
 .md :not(pre) > code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
 .md table { border-collapse: collapse; display: block; overflow-x: auto; }
