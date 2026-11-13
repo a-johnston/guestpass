@@ -1,12 +1,12 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
 import { listModels, streamChat, fetchProps, capabilitiesFrom } from './api.js';
-import { toolDefs, TOOL_SYSTEM_HINT, RENDER_TOOLS, omittedHtml, runTool, sanitizeId } from './tools.js';
+import { toolDefs, TOOL_SYSTEM_HINT, RENDER_TOOLS, omittedHtml, clearedHtml, runTool, sanitizeId } from './tools.js';
 import { createFrame, removeFrame, getFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
 import { sessionToMarkdown, formatDuration, formatSeconds } from './session.js';
-import { prepareHistory, mergeContent, userContent } from './content.js';
-import { pickImageMime, canEncodeWebp } from './media.js';
+import { prepareHistory, mergeContent, userContent, clearableSummary } from './content.js';
+import { pickImageMime, canEncodeWebp, formatBytes } from './media.js';
 import { createAttachmentTray, mediaRow } from './attachments.js';
 
 const MAX_TOOL_ROUNDS = 25; // granular tools (edit/read) take more rounds; Continue resumes past it
@@ -33,6 +33,7 @@ const state = {
   thinkingMode: 'all', // 'turn': current turn only; 'all': every turn (options popover)
   requestUsage: true, // stream_options.include_usage, for the context counter
   toolImages: true, // images inside tool results; off: sent in a user message after them
+  clearedBefore: 0, // "Clear media": messages before this index go out without their media and page HTML
   // From /models and /props at connect. vision: null = not reported (tried until rejected).
   caps: { vision: null, documents: false, basalt: false },
   context: { used: null, max: null },
@@ -58,6 +59,7 @@ const el = {
   queue: $('queue'),
   status: $('status'),
   ctx: $('ctx'),
+  clearMedia: $('clear-media'),
   panesShow: $('panes-show'),
   cfgStatus: $('cfg-status'),
   resizer: $('resizer'),
@@ -159,6 +161,7 @@ function setStatus(kind, text) {
  * the exact count replaces it when the server's usage report arrives.
  */
 function updateContext(live = null) {
+  if (!live) updateClearMedia();
   const { max } = state.context;
   const used = live ? (state.context.used ?? 0) + live.tokens : state.context.used;
   el.ctx.hidden = used == null && max == null;
@@ -431,6 +434,7 @@ function pushUser(text, parts = []) {
   const last = state.messages.at(-1);
   if (last?.role === 'user') last.content = mergeContent(last.content, content);
   else state.messages.push({ role: 'user', content });
+  updateClearMedia();
 }
 
 // ---------------------------------------------------------------- conversation
@@ -443,7 +447,7 @@ function buildRequest() {
   // tool loop; earlier turns' thinking is dropped, the usual practice for reasoning models.
   const lastUser = state.messages.findLastIndex((m) => m.role === 'user');
   let history = state.messages.map(({ reasoning, thinkingMs, ...m }, i) => {
-    if (m.tool_calls) m.tool_calls = m.tool_calls.map(forServer);
+    if (m.tool_calls) m.tool_calls = m.tool_calls.map((c) => forServer(c, i < state.clearedBefore));
     if (reasoning && state.sendReasoning && (state.thinkingMode === 'all' || i > lastUser)) m.reasoning_content = reasoning;
     return m;
   });
@@ -459,7 +463,7 @@ function buildRequest() {
     vision: state.caps.vision,
     documents: state.caps.documents,
     toolImages: state.toolImages,
-    clearedBefore: 0,
+    clearedBefore: state.clearedBefore,
   });
   const body = { messages: system ? [{ role: 'system', content: system }, ...history] : history };
   if (state.cfg.model) body.model = state.cfg.model;
@@ -484,14 +488,31 @@ function mediaUsed(history) {
 /**
  * A tool call as sent to the server. Once a widget/pane has been re-rendered under the same id,
  * the older call's HTML is replaced by a stub: the newer version is in context, and page HTML is
- * by far the largest thing in a widget-heavy history. The local copy (and session.md) keep it all.
+ * by far the largest thing in a widget-heavy history. "Clear media" (`cleared`) stubs it too.
+ * The local copy (and session.md) keep it all.
  */
-function forServer({ superseded, ...call }) {
-  if (!superseded) return call;
+function forServer({ superseded, ...call }, cleared = false) {
+  if (!superseded && !(cleared && RENDER_TOOLS.has(call.function?.name))) return call;
   let args;
   try { args = JSON.parse(call.function.arguments); } catch { return call; }
-  args.html = omittedHtml(args.id);
+  if (typeof args.html !== 'string') return call;
+  args.html = superseded ? omittedHtml(args.id) : clearedHtml(args.id);
   return { ...call, function: { ...call.function, arguments: JSON.stringify(args) } };
+}
+
+/** The "Clear media" button by the context counter: shown while anything re-sent could be dropped. */
+function updateClearMedia() {
+  const { bytes, tokens } = clearableSummary(state.messages, {
+    clearedBefore: state.clearedBefore, renderTools: RENDER_TOOLS, charsPerToken: state.charsPerToken,
+  });
+  el.clearMedia.hidden = bytes === 0;
+  el.clearMedia.textContent = `Clear media · ${formatBytes(bytes)}${tokens ? ` · ~${formatTokens(tokens)} tok` : ''}`;
+}
+
+function clearMedia() {
+  state.clearedBefore = state.messages.length;
+  updateClearMedia();
+  notice('Cleared media from what is sent to the model. The chat still shows it.');
 }
 
 /** Marks earlier renders of `id` as superseded by `latest` (see forServer). */
@@ -661,6 +682,7 @@ async function runTurn() {
             if (id) markSuperseded(id, call);
           } catch {}
         }
+        updateClearMedia();
       }
       if (state.stopRequested) return;
     }
@@ -1040,6 +1062,7 @@ function saveSession() {
 // ---------------------------------------------------------------- layout: panes + resizer
 
 function wireLayout() {
+  el.clearMedia.addEventListener('click', clearMedia);
   el.panesShow.addEventListener('click', () => panes.show());
   $('panes-hide').addEventListener('click', () => panes.hide());
 

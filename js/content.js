@@ -2,6 +2,7 @@
 // files. Parts may carry a local-only `meta` ({kind, name, bytes, mime, pageId?, width?, height?,
 // text?}) used for display, pruning and accounting; prepareHistory strips it before sending.
 // Pure, so it is unit tested under Node.
+import { imageTokens } from './media.js';
 
 const isMedia = (p) => p?.type === 'image_url' || p?.type === 'file';
 const textPart = (text) => ({ type: 'text', text });
@@ -104,6 +105,42 @@ function moveToolImages(messages) {
   }
   flush(null);
   return out;
+}
+
+/**
+ * What "Clear media" would stop re-sending: images and files still sent (not before the
+ * watermark, not an older screenshot of the same page) and page HTML not already stubbed.
+ * bytes are wire size; tokens are estimates (images by basalt's 32 px tiles, text by chars).
+ */
+export function clearableSummary(messages, { clearedBefore = 0, renderTools, charsPerToken = 4 }) {
+  const lastShot = new Map();
+  messages.forEach((m, i) => {
+    if (i < clearedBefore || !Array.isArray(m.content)) return;
+    for (const p of m.content) if (p.meta?.kind === 'screenshot') lastShot.set(p.meta.pageId, p);
+  });
+  let bytes = 0;
+  let tokens = 0;
+  let items = 0;
+  messages.forEach((m, i) => {
+    if (i < clearedBefore) return;
+    for (const p of Array.isArray(m.content) ? m.content : []) {
+      if (!isMedia(p) || (p.meta?.kind === 'screenshot' && lastShot.get(p.meta.pageId) !== p)) continue;
+      items++;
+      bytes += p.meta?.bytes ?? 0;
+      if (p.type === 'image_url' && p.meta?.width) tokens += imageTokens(p.meta.width, p.meta.height);
+      if (p.type === 'file' && typeof p.meta?.text === 'string') tokens += Math.round(p.meta.text.length / charsPerToken);
+    }
+    for (const c of m.tool_calls || []) {
+      if (c.superseded || !renderTools.has(c.function?.name)) continue;
+      let html;
+      try { html = JSON.parse(c.function.arguments).html; } catch { continue; }
+      if (typeof html !== 'string' || !html) continue;
+      items++;
+      bytes += html.length;
+      tokens += Math.round(html.length / charsPerToken);
+    }
+  });
+  return { bytes, tokens, items };
 }
 
 /** Drops local meta; a part array that is only text again becomes a plain string. */

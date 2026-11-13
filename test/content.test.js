@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeContent, contentText, prepareHistory, fence, userContent } from '../js/content.js';
+import { mergeContent, contentText, prepareHistory, fence, userContent, clearableSummary } from '../js/content.js';
 
 const URL = 'data:image/webp;base64,AAAA';
 const img = (name, extra = {}) => ({ type: 'image_url', image_url: { url: URL }, meta: { kind: 'attachment', name, bytes: 27, mime: 'image/webp', ...extra } });
@@ -116,4 +116,37 @@ test('fallback leaves tool messages without images alone', () => {
     { role: 'tool', tool_call_id: 'c1', content: 'Rendered.' },
   ];
   assert.deepEqual(prepareHistory(msgs, { ...ON, toolImages: false }), msgs);
+});
+
+const RENDER = new Set(['inline', 'pane']);
+const sized = (part, bytes, width, height) => ({ ...part, meta: { ...part.meta, bytes, width, height } });
+const summaryMsgs = () => [
+  { role: 'user', content: [{ type: 'text', text: 'look' }, sized(img('x.png'), 30000, 800, 600)] },
+  { role: 'assistant', content: '', tool_calls: [{ id: 'r', type: 'function', function: { name: 'inline', arguments: JSON.stringify({ html: 'x'.repeat(4000) }) } }] },
+  { role: 'tool', tool_call_id: 'r', content: 'Rendered.' },
+  { role: 'assistant', content: '', tool_calls: [call('s1'), call('s2')] },
+  { role: 'tool', tool_call_id: 's1', content: [{ type: 'text', text: 'one' }, sized(shot('a'), 20000, 1024, 768)] },
+  { role: 'tool', tool_call_id: 's2', content: [{ type: 'text', text: 'two' }, sized(shot('a'), 21000, 1024, 768)] },
+];
+
+test('clearableSummary counts sendable media and live page HTML', () => {
+  const s = clearableSummary(summaryMsgs(), { clearedBefore: 0, renderTools: RENDER, charsPerToken: 4 });
+  assert.deepEqual(s, { bytes: 30000 + 4000 + 21000, tokens: 475 + 1000 + 768, items: 3 });
+});
+
+test('clearableSummary skips superseded page HTML', () => {
+  const msgs = summaryMsgs();
+  msgs[1].tool_calls[0].superseded = true;
+  const s = clearableSummary(msgs, { clearedBefore: 0, renderTools: RENDER, charsPerToken: 4 });
+  assert.deepEqual(s, { bytes: 30000 + 21000, tokens: 475 + 768, items: 2 });
+});
+
+test('clearableSummary counts text files by their text', () => {
+  const msgs = [{ role: 'user', content: [file('a.py', { bytes: 500, text: 'x'.repeat(400) }), file('b.pdf', { bytes: 9000, mime: 'application/pdf' })] }];
+  assert.deepEqual(clearableSummary(msgs, { clearedBefore: 0, renderTools: RENDER, charsPerToken: 4 }), { bytes: 9500, tokens: 100, items: 2 });
+});
+
+test('nothing before the watermark counts', () => {
+  const msgs = summaryMsgs();
+  assert.deepEqual(clearableSummary(msgs, { clearedBefore: msgs.length, renderTools: RENDER, charsPerToken: 4 }), { bytes: 0, tokens: 0, items: 0 });
 });
