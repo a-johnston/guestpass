@@ -49,7 +49,10 @@
         <span id="ctx" class="ctx" role="status" hidden></span>
         <span class="spacer"></span>
         <div class="opts-wrap">
-          <button type="button" id="opts-btn" class="icon-btn" aria-label="Options" aria-haspopup="dialog" aria-expanded="false" aria-controls="opts">⚙</button>
+          <button type="button" id="opts-btn" class="icon-btn" aria-label="Options" aria-haspopup="dialog" aria-expanded="false" aria-controls="opts">
+            <!-- gear: a dashed ring (8 teeth: circumference 2π·6.6 ≈ 41.5 / 8) over a thick body ring -->
+            <svg viewBox="0 0 16 16" width="17" height="17" aria-hidden="true"><g fill="none" stroke="currentColor"><circle cx="8" cy="8" r="6.6" stroke-width="2.2" stroke-dasharray="2.6 2.58" transform="rotate(-11 8 8)"/><circle cx="8" cy="8" r="4.3" stroke-width="3"/></g></svg>
+          </button>
           <div id="opts" class="popover" role="dialog" aria-label="Options" hidden>
             <fieldset>
               <legend>Thinking sent back to the model</legend>

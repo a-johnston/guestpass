@@ -5,6 +5,7 @@
 
 --no-tools rejects any request carrying `tools`, like llama-server without --jinja.
 --no-reasoning rejects requests whose messages carry `reasoning_content`.
+--models-delay / --models-status slow down or fail /models (for the connecting state).
 /models reports mock-1 with meta.n_ctx 8192; with stream_options.include_usage, a rough token
 count is sent OpenAI-style (a final chunk with empty choices).
 
@@ -55,6 +56,8 @@ class Handler(BaseHTTPRequestHandler):
     key = None
     no_tools = False
     no_reasoning = False
+    models_delay = 0.0
+    models_status = 200
     usage = None
 
     def cors(self):
@@ -82,6 +85,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(404)
         if not self.authorized():
             return
+        time.sleep(self.models_delay)
+        if self.models_status != 200:
+            return self.reject(self.models_status, "model list unavailable (--models-status)")
         body = json.dumps({"object": "list", "data": [
             {"id": "mock-1", "meta": {"n_ctx": 8192}}, {"id": "mock-2"}]}).encode()
         self.send_response(200)
@@ -211,9 +217,13 @@ if __name__ == "__main__":
     ap.add_argument("--key", default=None)
     ap.add_argument("--no-tools", action="store_true")
     ap.add_argument("--no-reasoning", action="store_true")
+    ap.add_argument("--models-delay", type=float, default=0.0, help="seconds before /models answers")
+    ap.add_argument("--models-status", type=int, default=200, help="make /models fail with this status")
     a = ap.parse_args()
     Handler.key = a.key
     Handler.no_tools = a.no_tools
     Handler.no_reasoning = a.no_reasoning
+    Handler.models_delay = a.models_delay
+    Handler.models_status = a.models_status
     print(f"mock server on http://localhost:{a.port}/v1" + (f" (key: {a.key})" if a.key else ""))
     ThreadingHTTPServer(("127.0.0.1", a.port), Handler).serve_forever()

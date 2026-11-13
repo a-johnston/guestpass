@@ -22,6 +22,8 @@ const state = {
   thinkingMode: 'turn', // 'turn': current turn only; 'all': every turn (options popover)
   requestUsage: true, // stream_options.include_usage, for the context counter
   context: { used: null, max: null },
+  conn: 'pending', // model list: 'pending' (messages queue) | 'ok' | 'failed'
+  charsPerToken: 4, // streamed chars per output token, calibrated from usage; for live estimates
   messages: [],
   busy: false,
   stream: null, // AbortController of the in-flight completion request
@@ -91,21 +93,40 @@ function init() {
   el.prompt.focus();
 }
 
+const CONNECT_TIMEOUT_MS = 10000;
+
+/**
+ * Fetches the model list. Messages typed meanwhile are queued (state.conn === 'pending') and sent
+ * once it succeeds, since most servers need the model field. On failure the queue is kept: the
+ * notice offers a retry, and a queued message's "Send now" tries without a model anyway.
+ */
 async function connect() {
+  state.conn = 'pending';
   setStatus('pending', 'Connecting…');
+  updatePlaceholder();
   const { baseUrl, apiKey } = state.cfg;
   try {
-    const models = await listModels({ baseUrl, apiKey });
+    const models = await listModels({ baseUrl, apiKey, signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS) });
     // Links don't carry a model (it made them long); use the server's first one. If the server
     // lists none, the field is omitted and the server picks.
     state.cfg.model = models[0]?.id || '';
+    state.conn = 'ok';
     setStatus('ok', `Connected${state.cfg.model ? ` · ${state.cfg.model}` : ''}`);
+    updatePlaceholder();
+    if (state.queue.length && !state.busy) runTurn();
     state.context.max = models[0]?.contextLength || (await contextLengthFromProps({ baseUrl, apiKey }));
     updateContext();
   } catch (e) {
-    // Some servers have no /models endpoint; chat may still work, so don't block.
-    setStatus('warn', `Model list unavailable: ${e.message}`);
-    notice(`Couldn't list models: ${e.message}`, 'warn');
+    state.conn = 'failed';
+    updatePlaceholder();
+    const reason = e.name === 'TimeoutError' ? `no response after ${CONNECT_TIMEOUT_MS / 1000} s` : e.message;
+    setStatus('warn', `Couldn't connect: ${reason}`);
+    const waiting = state.queue.length ? ' Your queued message is waiting: retry, or use its "Send now" to try without a model.' : '';
+    const n = notice(`Couldn't reach the server (${reason}).${waiting}`, 'warn');
+    const retry = h('button', 'ghost small', 'Retry');
+    retry.type = 'button';
+    retry.addEventListener('click', () => { n.remove(); connect(); });
+    n.append(' ', retry);
   }
 }
 
@@ -114,15 +135,42 @@ function setStatus(kind, text) {
   el.status.setAttribute('aria-label', text);
 }
 
-/** Top-bar counter: tokens in the latest request (prompt + reply), out of the window if known. */
-function updateContext() {
-  const { used, max } = state.context;
+/**
+ * Top-bar counter: tokens in the latest request (prompt + reply), out of the window if known.
+ * While generating, `live` adds an estimate of the reply so far ("~") and the current speed;
+ * the exact count replaces it when the server's usage report arrives.
+ */
+function updateContext(live = null) {
+  const { max } = state.context;
+  const used = live ? (state.context.used ?? 0) + live.tokens : state.context.used;
   el.ctx.hidden = used == null && max == null;
   if (el.ctx.hidden) return;
-  const text = `${used == null ? '–' : formatTokens(used)}${max ? ` / ${formatTokens(max)}` : ''}`;
-  el.ctx.textContent = text;
+  const count = used == null ? '–' : `${live ? '~' : ''}${formatTokens(used)}`;
+  const speed = live?.tps ? ` · ${Math.round(live.tps)} tok/s` : '';
+  el.ctx.textContent = `${count}${max ? ` / ${formatTokens(max)}` : ''}${speed}`;
   el.ctx.setAttribute('aria-label', `Context: ${used ?? 'unknown'} of ${max ?? 'unknown'} tokens`);
   el.ctx.dataset.level = max && used != null ? (used / max >= 0.9 ? 'high' : used / max >= 0.75 ? 'mid' : '') : '';
+}
+
+const streamedChars = (p) => p.content.length + p.reasoning.length + p.toolCalls.reduce((n, c) => n + (c.function.arguments?.length || 0), 0);
+
+let lastLiveUpdate = 0;
+/** Throttled live estimate while a reply streams (servers only report usage at the end). */
+function showLiveContext(p, firstToken) {
+  const now = performance.now();
+  if (now - lastLiveUpdate < 250) return;
+  lastLiveUpdate = now;
+  const tokens = Math.round(streamedChars(p) / state.charsPerToken);
+  const secs = firstToken ? (now - firstToken) / 1000 : 0;
+  updateContext({ tokens, tps: secs > 0.5 ? tokens / secs : null });
+}
+
+/** Learns this server/model's chars-per-token from a finished reply, for the next live estimate. */
+function calibrateCharsPerToken(p, usage) {
+  const out = usage?.completion_tokens;
+  if (!out || out < 20) return;
+  const ratio = streamedChars(p) / out;
+  if (ratio > 0.5 && ratio < 12) state.charsPerToken = state.charsPerToken * 0.5 + ratio * 0.5;
 }
 
 function formatTokens(n) {
@@ -227,10 +275,15 @@ function flash(btn, text) {
 
 const IDLE_PLACEHOLDER = 'Message…  (Enter to send, Shift+Enter for newline)';
 const BUSY_PLACEHOLDER = 'Queue a message… it is sent at the next step (Esc stops)';
+const CONNECTING_PLACEHOLDER = 'Connecting… messages are queued until the server answers';
+
+function updatePlaceholder() {
+  el.prompt.placeholder = state.busy ? BUSY_PLACEHOLDER : state.conn === 'pending' ? CONNECTING_PLACEHOLDER : IDLE_PLACEHOLDER;
+}
 
 function wireComposer() {
   const form = $('composer');
-  el.prompt.placeholder = IDLE_PLACEHOLDER;
+  updatePlaceholder();
   el.prompt.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -248,8 +301,8 @@ function wireComposer() {
     el.prompt.value = '';
     autosize();
     following = true; // sending is a clear "take me to the latest"
-    if (state.busy) {
-      enqueue(text);
+    if (state.busy || state.conn === 'pending') {
+      enqueue(text); // during a run: steering; while connecting: sent once the model is known
     } else {
       pushUser(text);
       runTurn();
@@ -271,7 +324,7 @@ function autosize() {
 function setBusy(busy) {
   state.busy = busy;
   el.stop.hidden = !busy;
-  el.prompt.placeholder = busy ? BUSY_PLACEHOLDER : IDLE_PLACEHOLDER;
+  updatePlaceholder();
   if (!busy) el.prompt.focus();
 }
 
@@ -286,6 +339,7 @@ function enqueue(text) {
   now.type = 'button';
   now.title = 'Interrupt the current response and send queued messages';
   now.addEventListener('click', () => {
+    if (!state.busy) return runTurn(); // still connecting, or it failed: send now regardless
     state.interrupt = true;
     state.stream?.abort(); // if tools are running instead, the queue goes out right after them
   });
@@ -440,6 +494,7 @@ async function runTurn() {
             if (!firstToken && (p.content || p.reasoning || p.toolCalls.length)) firstToken = performance.now();
             partial = p;
             view.update(p);
+            showLiveContext(p, firstToken);
           },
         });
       } catch (e) {
@@ -468,8 +523,9 @@ async function runTurn() {
       if (result.usage) {
         const u = result.usage;
         state.context.used = u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0);
-        updateContext();
+        calibrateCharsPerToken(result, u);
       }
+      updateContext(); // exact figure replaces the live estimate (or clears it if usage wasn't sent)
 
       const ended = performance.now();
       view.finish(result, {
@@ -508,6 +564,7 @@ async function runTurn() {
     }
   } finally {
     state.stream = null;
+    updateContext(); // drop any live estimate left by an interrupted or failed stream
     if (state.stopRequested && state.queue.length) {
       // Stop means stop: hand queued text back for editing instead of sending it.
       el.prompt.value = [...takeQueue(), el.prompt.value].filter(Boolean).join('\n\n');
