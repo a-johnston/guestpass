@@ -172,6 +172,23 @@ function wireSetup() {
   });
 }
 
+/** Copies text, falling back to execCommand where the async clipboard API is unavailable (non-HTTPS). */
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = Object.assign(document.createElement('textarea'), { value: text });
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    ta.remove();
+    return ok;
+  }
+}
+
 function flash(btn, text) {
   const old = btn.textContent;
   btn.textContent = text;
@@ -552,6 +569,15 @@ function createAssistantView() {
       if (!p.content && !p.reasoning && !p.toolCalls.length) body.append(h('em', 'muted', '(empty response)'));
       if (stopped) body.append(h('div', 'muted small', '— interrupted'));
       if (p.finishReason === 'length') body.append(h('div', 'muted small', '— cut off (max tokens reached)'));
+      if (p.content) {
+        const actions = h('div', 'msg-actions');
+        const copy = h('button', 'ghost small', 'Copy');
+        copy.type = 'button';
+        copy.title = 'Copy this message as markdown';
+        copy.addEventListener('click', async () => flash(copy, (await copyText(p.content)) ? 'Copied' : 'Copy failed'));
+        actions.append(copy);
+        root.append(actions);
+      }
     },
     addToolCall(call) {
       root.classList.remove('pending');

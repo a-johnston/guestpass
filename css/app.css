@@ -99,6 +99,9 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .msg.assistant[data-calling]:not([data-calling=""])::after { content: attr(data-calling); display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
 .msg.assistant.error .md { color: var(--danger); white-space: pre-wrap; }
 .retry-row { margin-top: 8px; }
+.msg-actions { display: flex; gap: 6px; margin-top: 6px; opacity: 0; transition: opacity .15s; }
+.msg.assistant:hover .msg-actions, .msg-actions:focus-within { opacity: 1; }
+@media (hover: none) { .msg-actions { opacity: 1; } }
 
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
