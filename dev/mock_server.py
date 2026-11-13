@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tiny fake OpenAI-compatible server for developing Chat Bridge without a real model.
+"""Tiny fake OpenAI-compatible server for developing Guestpass without a real model.
 
     python3 dev/mock_server.py [--port 8099] [--key sk-test] [--no-tools]
 

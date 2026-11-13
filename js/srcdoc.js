@@ -5,10 +5,10 @@
 //   - calls `window.onPatch(data)` when the parent sends a patch, returning its result
 // Pure string work, so it is unit tested under Node.
 
-export const BOOTSTRAP_MARKER = 'data-chat-bridge-bootstrap';
+export const BOOTSTRAP_MARKER = 'data-guestpass-bootstrap';
 
 const bootstrap = (kvJson) => `<script ${BOOTSTRAP_MARKER}>(function () {
-  function send(m) { m.__chatBridge = 1; try { parent.postMessage(m, '*'); } catch (e) {} }
+  function send(m) { m.__guestpass = 1; try { parent.postMessage(m, '*'); } catch (e) {} }
   function fmt(a) {
     try {
       if (a instanceof Error) return a.stack || String(a);
@@ -81,7 +81,7 @@ const bootstrap = (kvJson) => `<script ${BOOTSTRAP_MARKER}>(function () {
 
   addEventListener('message', function (e) {
     var m = e.data;
-    if (e.source !== parent || !m || m.__chatBridge !== 1) return;
+    if (e.source !== parent || !m || m.__guestpass !== 1) return;
     if (m.type === 'kv') { apply(m.key, m.value, m.deleted); return; }
     if (m.type === 'patch') {
       var reply = function (ok, value) { send({ type: 'patch-result', reqId: m.reqId, ok: ok, value: value }); };

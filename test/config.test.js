@@ -49,6 +49,6 @@ test('normalizeBaseUrl trims slashes and a pasted endpoint suffix', () => {
 });
 
 test('buildShareLink replaces any existing hash', () => {
-  const link = buildShareLink('https://me.github.io/chat-bridge/#old', { baseUrl: 'https://x/v1/', apiKey: 'k' });
-  assert.equal(link, `https://me.github.io/chat-bridge/#${b64('https://x/v1 k')}`);
+  const link = buildShareLink('https://me.github.io/guestpass/#old', { baseUrl: 'https://x/v1/', apiKey: 'k' });
+  assert.equal(link, `https://me.github.io/guestpass/#${b64('https://x/v1 k')}`);
 });

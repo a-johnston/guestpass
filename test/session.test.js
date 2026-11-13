@@ -13,7 +13,7 @@ test('renders header, turns, and one Assistant heading across tool rounds', () =
     { role: 'user', content: 'thanks' },
   ], { model: 'qwen', savedAt });
 
-  assert.match(md, /^# Chat Bridge session\n\n- Saved: 2026-11-12 21:05\n- Model: qwen\n\n---\n\n## User\n\ndraw a box\n\n## Assistant\n\nSure\.\n/);
+  assert.match(md, /^# Guestpass session\n\n- Saved: 2026-11-12 21:05\n- Model: qwen\n\n---\n\n## User\n\ndraw a box\n\n## Assistant\n\nSure\.\n/);
   assert.equal(md.match(/## Assistant/g).length, 1, 'tool rounds stay in one assistant section');
   assert.match(md, /<summary>Tool call: render_inline · box<\/summary>\n\n```json\n\{\n  "id": "box"\n\}\n```\n\n```html\n<div>box<\/div>\n```\n\nResult:\n\n```\nRendered widget "box"\.\n```\n\n<\/details>/);
   assert.match(md, /Done!\n\n## User\n\nthanks\n$/);

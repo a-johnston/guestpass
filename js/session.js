@@ -6,7 +6,7 @@
  * @param {{model?:string, system?:string, savedAt?:Date}} meta
  */
 export function sessionToMarkdown(messages, { model = '', system = '', savedAt = new Date() } = {}) {
-  const out = ['# Chat Bridge session', ''];
+  const out = ['# Guestpass session', ''];
   out.push(`- Saved: ${formatDate(savedAt)}`);
   if (model) out.push(`- Model: ${model}`);
   out.push('');

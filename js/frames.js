@@ -21,7 +21,7 @@ let patchSeq = 0;
 
 window.addEventListener('message', (e) => {
   const m = e.data;
-  if (!m || m.__chatBridge !== 1) return;
+  if (!m || m.__guestpass !== 1) return;
   for (const f of frames.values()) {
     if (f.iframe.contentWindow !== e.source) continue;
     switch (m.type) {
@@ -50,7 +50,7 @@ window.addEventListener('message', (e) => {
 });
 
 function post(f, msg) {
-  try { f.iframe.contentWindow?.postMessage({ ...msg, __chatBridge: 1 }, '*'); } catch {}
+  try { f.iframe.contentWindow?.postMessage({ ...msg, __guestpass: 1 }, '*'); } catch {}
 }
 
 /** Updates the store and relays the change to every frame except `origin` (which applied it already). */

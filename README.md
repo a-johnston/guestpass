@@ -1,4 +1,4 @@
-# Chat Bridge
+# Guestpass
 
 A static, no-build chat front-end for any OpenAI-compatible server with tool calls for rendering model outputs into the page.
 
