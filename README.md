@@ -4,8 +4,8 @@ A static, no-build chat front-end for any OpenAI-compatible server with tool cal
 
 - After connecting to a server, a shareable url can be copied so others can easily connect using the same info. The connection info is is *encoded, not encrypted*: anyone with the link can connect and api keys should be temporary. The link fragment is the unpadded base64url of `baseUrl apiKey [system prompt]`, and chats use the first model the server lists.
 - The model gets tools that run in the browser:
-  - `render_inline`: an HTML/JS widget inside the chat (re-rendering the same id replaces the earlier widget)
-  - `open_pane`: a full page or app in a tabbed side pane (passing the same id reloads it with new content)
+  - `inline`: an HTML/JS widget inside the chat (re-rendering the same id replaces the earlier widget)
+  - `pane`: a full page or app in a tabbed side pane (passing the same id reloads it with new content)
   - `patch`: send JSON to a running widget/pane's `window.onPatch(data)` without reloading it; the return value comes back to the model
   - `kv`: read/update a key/value store shared live by every widget and pane (exposed inside them as `kv.get/set/delete/all/subscribe`)
   - `close`: close a pane or remove a widget

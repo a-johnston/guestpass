@@ -16,8 +16,8 @@ Scripted behaviour, keyed off the last user message:
                     -> after each tool result, calls another tool (for the round limit)
   contains "long"   -> streams 80 paragraphs over ~4s (for auto-scroll tests)
   contains "slow"   -> streams reasoning for ~3s before answering (for queue/steering tests)
-  contains "pane"   -> calls open_pane with a small canvas app (logs one console.error)
-  contains "inline" -> calls render_inline with an SVG
+  contains "pane"   -> calls pane with a small canvas app (logs one console.error)
+  contains "inline" -> calls inline with an SVG
   contains "think"  -> streams reasoning_content before the answer
   otherwise         -> echoes back markdown with a runnable ```html block
 After a tool result it replies with a short summary that quotes the tool output.
@@ -180,10 +180,10 @@ class Handler(BaseHTTPRequestHandler):
             self.stream_text(f"You said: **{user}**")
         elif has_tools and "pane" in key.lower():
             self.stream_text("Opening a pane for you.")
-            self.tool_call("open_pane", {"id": "bouncer", "title": "Bouncer", "html": PANE_HTML})
+            self.tool_call("pane", {"id": "bouncer", "title": "Bouncer", "html": PANE_HTML})
             return self.end_stream()
         elif has_tools and "inline" in key.lower():
-            self.tool_call("render_inline", {"title": "SVG demo", "html": INLINE_HTML})
+            self.tool_call("inline", {"title": "SVG demo", "html": INLINE_HTML})
             return self.end_stream()
         else:
             if "think" in key.lower():

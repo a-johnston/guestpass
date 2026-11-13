@@ -1,6 +1,6 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
 import { listModels, streamChat, contextLengthFromProps } from './api.js';
-import { TOOL_DEFS, TOOL_SYSTEM_HINT, runTool, sanitizeId } from './tools.js';
+import { TOOL_DEFS, TOOL_SYSTEM_HINT, RENDER_TOOLS, runTool, sanitizeId } from './tools.js';
 import { createFrame, removeFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
@@ -374,8 +374,6 @@ function markSuperseded(id, latest) {
  * Optional request features the server may reject. If a request fails with an error mentioning
  * one that's still on, it's switched off for the session and the request retried without it.
  */
-const RENDER_TOOLS = new Set(['render_inline', 'open_pane']);
-
 const FALLBACKS = [
   { key: 'toolsSupported', match: /tool|jinja|function.?call/i, notice: 'This server doesn’t accept tool calls, so widgets and panes are off for this session.' },
   { key: 'sendReasoning', match: /reasoning/i },
