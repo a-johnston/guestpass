@@ -220,9 +220,15 @@ async function refreshModels() {
   updateShareLink();
 }
 
+/** The link for the form as filled in, or '' while the URL is still incomplete (e.g. mid-typing). */
 function currentLink() {
   const cfg = readSetupForm();
-  return cfg.baseUrl ? buildShareLink(location.href, cfg) : '';
+  if (!cfg.baseUrl) return '';
+  try {
+    return buildShareLink(location.href, cfg);
+  } catch {
+    return '';
+  }
 }
 
 function updateShareLink() {
