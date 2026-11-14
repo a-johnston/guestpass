@@ -22,4 +22,4 @@ The mock server has scripted responses: `call:{"name":"kv","args":{},"loop":true
 
 ## License
 
-Apache License 2.0; see [LICENSE](LICENSE). The libraries in `vendor/` keep their own licenses, noted in each file's header: marked (MIT), DOMPurify (Apache-2.0 or MPL-2.0) and highlight.js (BSD-3-Clause).
+Apache License 2.0; see [LICENSE](LICENSE). The libraries in `vendor/` keep their own licenses, noted in each file's header: marked (MIT), DOMPurify (Apache-2.0 or MPL-2.0) and highlight.js (BSD-3-Clause). marked and DOMPurify ship no minified ES-module build, so they were minified from upstream with the command in their headers.

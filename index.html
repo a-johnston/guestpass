@@ -7,6 +7,29 @@
   <title>Guestpass</title>
   <link rel="stylesheet" href="css/app.css" />
   <script type="module" src="js/main.js"></script>
+  <!-- Every static import of main.js, so the module graph loads in one round trip instead of one per
+       import level. test/preload.test.js keeps this list in sync; highlight.js is loaded on demand. -->
+  <link rel="modulepreload" href="vendor/marked.esm.min.js" />
+  <link rel="modulepreload" href="vendor/purify.es.min.mjs" />
+  <link rel="modulepreload" href="js/api.js" />
+  <link rel="modulepreload" href="js/attachments.js" />
+  <link rel="modulepreload" href="js/compact.js" />
+  <link rel="modulepreload" href="js/compaction-config.js" />
+  <link rel="modulepreload" href="js/config.js" />
+  <link rel="modulepreload" href="js/content.js" />
+  <link rel="modulepreload" href="js/fallbacks.js" />
+  <link rel="modulepreload" href="js/frames.js" />
+  <link rel="modulepreload" href="js/items.js" />
+  <link rel="modulepreload" href="js/markdown.js" />
+  <link rel="modulepreload" href="js/media.js" />
+  <link rel="modulepreload" href="js/panes.js" />
+  <link rel="modulepreload" href="js/recall.js" />
+  <link rel="modulepreload" href="js/responses.js" />
+  <link rel="modulepreload" href="js/session.js" />
+  <link rel="modulepreload" href="js/source.js" />
+  <link rel="modulepreload" href="js/srcdoc.js" />
+  <link rel="modulepreload" href="js/stream.js" />
+  <link rel="modulepreload" href="js/tools.js" />
 </head>
 <body>
   <!-- Without a #<payload> link: build one. With one: chat. -->
