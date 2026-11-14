@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeContent, contentText, prepareHistory, fence, userContent, clearableSummary, markCleared } from '../js/content.js';
+import { mergeContent, contentText, prepareHistory, fence, userContent, clearableSummary, markCleared, estimateTokens, shouldRebase } from '../js/content.js';
 
 const URL = 'data:image/webp;base64,AAAA';
 const img = (name, extra = {}) => ({ type: 'image_url', image_url: { url: URL }, meta: { kind: 'attachment', name, bytes: 27, mime: 'image/webp', ...extra } });
@@ -168,4 +168,33 @@ test('nothing already cleared counts', () => {
   const msgs = summaryMsgs();
   markCleared(msgs, RENDER);
   assert.deepEqual(clearableSummary(msgs, { renderTools: RENDER, charsPerToken: 4 }), { bytes: 0, tokens: 0, items: 0 });
+});
+
+test('estimateTokens: text by chars, images at their 1 MP cap, tool calls and reasoning', () => {
+  assert.equal(estimateTokens([{ role: 'user', content: 'abcdefgh' }], { charsPerToken: 4 }), 2);
+  assert.equal(estimateTokens([{ role: 'user', content: [
+    { type: 'text', text: 'abcd' },
+    { type: 'image_url', image_url: { url: 'data:image/webp;base64,AAAA' } },
+  ] }], { charsPerToken: 4 }), 1025);
+  assert.equal(estimateTokens([{
+    role: 'assistant', content: '', reasoning_content: 'abcd',
+    tool_calls: [{ id: 'c', type: 'function', function: { name: 'n', arguments: 'abcdefgh' } }],
+  }], { charsPerToken: 4 }), 3);
+  // 16 base64 chars decode to 12 bytes: 3 tokens at 4 chars per token.
+  assert.equal(estimateTokens([{ role: 'user', content: [
+    { type: 'file', file: { filename: 'a.pdf', file_data: 'data:application/pdf;base64,AAAAAAAAAAAAAAAA' } },
+  ] }], { charsPerToken: 4 }), 3);
+  assert.equal(estimateTokens([{ role: 'user', content: 'abcdefgh' }]), 2, 'defaults to 4 chars per token');
+});
+
+test('shouldRebase: near the limit, and only when it frees enough', () => {
+  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 60 }), true);
+  assert.equal(shouldRebase({ used: 70, max: 100, trimmed: 10 }), false, 'under 75%');
+  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 75 }), false, 'saves under 10%');
+  assert.equal(shouldRebase({ used: null, max: 100, trimmed: 0 }), false);
+  assert.equal(shouldRebase({ used: 80, max: null, trimmed: 0 }), false);
+});
+
+test('shouldRebase: no repeat after a rebase (the server then holds the trimmed history)', () => {
+  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 79 }), false);
 });

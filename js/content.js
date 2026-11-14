@@ -163,3 +163,37 @@ function finalize(m) {
   const parts = m.content.map(({ meta, ...p }) => p);
   return { ...m, content: parts.every((p) => p.type === 'text') ? parts.map((p) => p.text).join('\n\n') : parts };
 }
+
+/** Estimated tokens per image: images are scaled to about 1 MP (MAX_IMAGE_PIXELS), 1024 tokens on basalt. */
+const IMAGE_TOKENS = 1024;
+
+/**
+ * Rough token count of prepared (sent-shape) messages: text, reasoning and tool-call arguments by
+ * chars, images at their size cap, files by decoded size. For deciding on a rebase, not billing.
+ */
+export function estimateTokens(messages, { charsPerToken = 4 } = {}) {
+  let chars = 0;
+  let images = 0;
+  for (const m of messages) {
+    for (const p of asParts(m.content)) {
+      if (p.type === 'text') chars += p.text?.length ?? 0;
+      else if (p.type === 'image_url') images++;
+      else if (p.type === 'file') {
+        const data = String(p.file?.file_data ?? '');
+        chars += (data.length - data.indexOf(',') - 1) * 3 / 4;
+      }
+    }
+    chars += m.reasoning_content?.length ?? 0;
+    for (const c of m.tool_calls || []) chars += c.function?.arguments?.length ?? 0;
+  }
+  return Math.round(chars / charsPerToken) + images * IMAGE_TOKENS;
+}
+
+/**
+ * Whether to drop the chain and resend the trimmed history: the context (`used`, as last
+ * reported) is at least 75% of `max`, and the resend (`trimmed`, estimated) frees at least 10%.
+ */
+export function shouldRebase({ used, max, trimmed }) {
+  if (!(used > 0) || !(max > 0)) return false;
+  return used >= 0.75 * max && used - trimmed >= 0.10 * max;
+}
