@@ -3,6 +3,14 @@
 
     python3 dev/mock_server.py [--port 8099] [--key sk-test] [--no-tools]
 
+Serves /v1/chat/completions and /v1/responses with the same scripted replies. /v1/responses keeps
+each response's history in memory (resp_<n>) so `previous_response_id` chains, and drops a
+response once another one chains from it, like the proxy. Unknown ids get the proxy's 404
+`previous_response_not_found`. Every POST prints `POST <route> prev=<id|-> items=<n> bytes=<n>`.
+--no-responses: /v1/responses is a plain-text 404 (route missing: clients fall back to chat).
+--stateless-responses: rejects `previous_response_id` with a 400 and answers `store: false`, like basalt.
+--forget-every N: every Nth chained request gets the not-found 404.
+
 --no-tools rejects any request carrying `tools`, like llama-server without --jinja.
 --no-reasoning rejects requests whose messages carry `reasoning_content`.
 --no-vision reports a text-only model and rejects image parts; --no-documents rejects `file` parts;
@@ -29,7 +37,9 @@ After a tool result it replies with a short summary that quotes the tool output.
 Chunks are deliberately split mid-line to exercise the client's SSE parser.
 """
 import argparse
+import itertools
 import json
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -77,6 +87,61 @@ def media_note(msg):
     return f"Received: {images} image(s), {files} file(s)" if images or files else ""
 
 
+NOT_FOUND = ("Response not found (evicted, deleted, store:false, or server restarted). "
+             "Resend the full input without previous_response_id.")
+
+
+def chat_parts(parts):
+    """Responses input parts as chat content parts (the inverse of the client's conversion)."""
+    if isinstance(parts, str):
+        return parts
+    out = []
+    for p in parts or []:
+        t = p.get("type")
+        if t in ("input_text", "output_text"):
+            out.append({"type": "text", "text": p.get("text", "")})
+        elif t == "input_image":
+            out.append({"type": "image_url", "image_url": {"url": p.get("image_url")}})
+        elif t == "input_file":
+            out.append({"type": "file", "file": {"filename": p.get("filename"), "file_data": p.get("file_data")}})
+        else:
+            out.append(p)
+    return out
+
+
+def items_to_messages(items):
+    """Responses input items as chat messages: reasoning, text and calls fold into one assistant message."""
+    if isinstance(items, str):
+        items = [{"role": "user", "content": items}]
+    msgs = []
+    for it in items:
+        t = it.get("type", "message")
+        last = msgs[-1] if msgs else {}
+        if t == "reasoning":
+            text = "".join(p.get("text", "") for p in it.get("content") or [])
+            msgs.append({"role": "assistant", "content": "", "reasoning_content": text})
+        elif t == "function_call":
+            call = {"id": it.get("call_id"), "type": "function",
+                    "function": {"name": it.get("name"), "arguments": it.get("arguments", "")}}
+            if last.get("role") == "assistant":
+                last.setdefault("tool_calls", []).append(call)
+            else:
+                msgs.append({"role": "assistant", "content": "", "tool_calls": [call]})
+        elif t == "function_call_output":
+            msgs.append({"role": "tool", "tool_call_id": it.get("call_id"), "content": chat_parts(it.get("output"))})
+        elif it.get("role") == "assistant":
+            text = text_of(chat_parts(it.get("content")))
+            if last.get("role") == "assistant" and not last.get("content") and not last.get("tool_calls"):
+                last["content"] = text
+            else:
+                msgs.append({"role": "assistant", "content": text})
+        elif it.get("role") in ("system", "developer"):
+            msgs.append({"role": "system", "content": text_of(chat_parts(it.get("content")))})
+        else:
+            msgs.append({"role": it.get("role", "user"), "content": chat_parts(it.get("content"))})
+    return msgs
+
+
 def chunk(delta, finish=None):
     return {"id": "mock", "object": "chat.completion.chunk", "model": "mock-1",
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
@@ -92,7 +157,17 @@ class Handler(BaseHTTPRequestHandler):
     no_caps = False
     models_delay = 0.0
     models_status = 200
+    no_responses = False
+    stateless_responses = False
+    forget_every = 0
     usage = None
+    dialect = "chat"
+    # /v1/responses state, shared by all request threads.
+    lock = threading.Lock()
+    responses = {}  # id -> chat history including that response's reply
+    response_ids = itertools.count(1)
+    call_ids = itertools.count(1)
+    chained_requests = 0
 
     def cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -155,12 +230,45 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        if not self.path.rstrip("/").endswith("/chat/completions"):
-            return self.send_error(404)
+        path = self.path.rstrip("/")
+        responses = path.endswith("/responses")
+        if not responses and not path.endswith("/chat/completions"):
+            return self.missing()
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        req = json.loads(raw or b"{}")
+        prev = req.get("previous_response_id") if responses else None
+        items = req.get("input", []) if responses else req.get("messages", [])
+        print(f"POST {path} prev={prev or '-'} items={len(items) if isinstance(items, list) else 1} bytes={len(raw)}", flush=True)
+        if responses and self.no_responses:
+            return self.missing()
         if not self.authorized():
             return
-        req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-        msgs = req.get("messages", [])
+        if not responses:
+            self.dialect = "chat"
+            return self.serve(items, req, req.get("stream_options") or {})
+
+        history = []
+        if prev:
+            if self.stateless_responses:
+                return self.reject(400, "previous_response_id is not supported; send the whole conversation",
+                                   type="invalid_request_error", param="previous_response_id")
+            with self.lock:
+                Handler.chained_requests += 1
+                forget = self.forget_every and Handler.chained_requests % self.forget_every == 0
+                history = None if forget else self.responses.get(prev)
+            if history is None:
+                return self.reject(404, NOT_FOUND, type="invalid_request_error", param="previous_response_id",
+                                   code="previous_response_not_found")
+        history = history + items_to_messages(items)
+        system = [{"role": "system", "content": req["instructions"]}] if req.get("instructions") else []
+        self.dialect = "responses"
+        self.prev = prev
+        self.history = history
+        self.response_id = f"resp_{next(self.response_ids)}"
+        self.serve(system + history, req, {"include_usage": True})
+
+    def serve(self, msgs, req, stream_options):
+        """Checks the rejection flags, then streams a scripted reply in the request's dialect."""
         has_tools = bool(req.get("tools"))
         if has_tools and self.no_tools:
             return self.reject(500, "tools param requires --jinja flag")
@@ -174,20 +282,51 @@ class Handler(BaseHTTPRequestHandler):
             return self.reject(400, "unsupported content part type: file")
         # Rough token count (4 chars/token) so the client's context counter has numbers to show.
         self.usage = None
-        if (req.get("stream_options") or {}).get("include_usage"):
+        if stream_options.get("include_usage"):
             self.usage = {"prompt_tokens": len(json.dumps(msgs)) // 4, "completion_tokens": 0}
+        self.reply = {"content": "", "reasoning": "", "calls": [], "finish": None}
+        self.items = []  # Responses output items; the last one may still be open
         self.send_response(200)
         self.cors()
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         try:
+            if self.dialect == "responses":
+                self.event({"type": "response.created", "response": self.response_object("in_progress")})
             self.respond(msgs, has_tools)
         except (BrokenPipeError, ConnectionResetError):
             pass
+        finally:
+            # Kept even when the client hung up: the proxy stores a stopped response too.
+            if self.dialect == "responses":
+                self.store()
 
-    def reject(self, status, message):
-        body = json.dumps({"error": {"message": message}}).encode()
+    def store(self):
+        if self.stateless_responses:
+            return
+        r = self.reply
+        msg = {"role": "assistant", "content": r["content"]}
+        if r["reasoning"]:
+            msg["reasoning_content"] = r["reasoning"]
+        if r["calls"]:
+            msg["tool_calls"] = r["calls"]
+        with self.lock:
+            self.responses[self.response_id] = self.history + [msg]
+            self.responses.pop(self.prev, None)  # evicted once something chains from it
+
+    def missing(self):
+        """A route this server doesn't have: a plain-text 404 (with CORS, so browsers can read it)."""
+        body = b"Not Found"
+        self.send_response(404)
+        self.cors()
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def reject(self, status, message, **fields):
+        body = json.dumps({"error": {"message": message, **fields}}).encode()
         self.send_response(status)
         self.cors()
         self.send_header("Content-Type", "application/json")
@@ -195,16 +334,90 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def emit(self, obj, split=True):
-        if self.usage is not None:
-            for c in obj.get("choices", []):
-                d = c.get("delta", {})
+        """Sends a chat chunk, or on /responses the equivalent Responses events."""
+        for c in obj.get("choices", []):
+            d = c.get("delta", {})
+            if self.usage is not None:
                 self.usage["completion_tokens"] += len(d.get("content") or "") // 4 + len(d.get("reasoning_content") or "") // 4
-        data = f"data: {json.dumps(obj)}\n\n".encode()
+            self.record(d, c.get("finish_reason"))
+            if self.dialect == "responses":
+                self.translate(d)
+        if self.dialect == "chat":
+            self.send(f"data: {json.dumps(obj)}\n\n".encode(), split)
+
+    def send(self, data, split=True):
         parts = [data[: len(data) // 2], data[len(data) // 2:]] if split else [data]
         for p in parts:
             self.wfile.write(p)
             self.wfile.flush()
             time.sleep(0.01)
+
+    def event(self, ev):
+        self.send(f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n".encode())
+
+    def record(self, d, finish):
+        """Keeps the reply in chat shape, to store it for chaining."""
+        r = self.reply
+        r["content"] += d.get("content") or ""
+        r["reasoning"] += d.get("reasoning_content") or ""
+        for tc in d.get("tool_calls") or []:
+            if tc.get("id"):
+                r["calls"].append({"id": tc["id"], "type": "function", "function": {"name": tc["function"]["name"], "arguments": ""}})
+            r["calls"][-1]["function"]["arguments"] += tc.get("function", {}).get("arguments") or ""
+        if finish:
+            r["finish"] = finish
+
+    def open_item(self, item):
+        self.close_item()
+        item["status"] = "in_progress"
+        self.items.append(item)
+        self.event({"type": "response.output_item.added", "output_index": len(self.items) - 1, "item": item})
+        return item
+
+    def close_item(self):
+        item = self.items[-1] if self.items else None
+        if item and item["status"] == "in_progress":
+            item["status"] = "completed"
+            self.event({"type": "response.output_item.done", "output_index": len(self.items) - 1, "item": item})
+
+    def current(self, kind):
+        item = self.items[-1] if self.items else None
+        return item if item and item["status"] == "in_progress" and item["type"] == kind else None
+
+    def translate(self, d):
+        n = len(self.items)
+        if d.get("reasoning_content"):
+            item = self.current("reasoning") or self.open_item(
+                {"id": f"rs_{n}", "type": "reasoning", "content": [{"type": "reasoning_text", "text": ""}]})
+            item["content"][0]["text"] += d["reasoning_content"]
+            self.event({"type": "response.reasoning_text.delta", "item_id": item["id"],
+                        "output_index": len(self.items) - 1, "content_index": 0, "delta": d["reasoning_content"]})
+        if d.get("content"):
+            item = self.current("message") or self.open_item(
+                {"id": f"msg_{n}", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]})
+            item["content"][0]["text"] += d["content"]
+            self.event({"type": "response.output_text.delta", "item_id": item["id"],
+                        "output_index": len(self.items) - 1, "content_index": 0, "delta": d["content"]})
+        for tc in d.get("tool_calls") or []:
+            fn = tc.get("function", {})
+            if tc.get("id"):
+                self.open_item({"id": f"fc_{n}", "type": "function_call", "call_id": tc["id"],
+                                "name": fn.get("name"), "arguments": ""})
+            item = self.current("function_call")
+            if item and fn.get("arguments"):
+                item["arguments"] += fn["arguments"]
+                self.event({"type": "response.function_call_arguments.delta", "item_id": item["id"],
+                            "output_index": len(self.items) - 1, "delta": fn["arguments"]})
+
+    def response_object(self, status):
+        r = {"id": self.response_id, "object": "response", "status": status, "model": "mock-1",
+             "store": not self.stateless_responses, "previous_response_id": self.prev, "output": self.items}
+        if status == "completed":
+            u = self.usage
+            r["usage"] = {"input_tokens": u["prompt_tokens"], "output_tokens": u["completion_tokens"],
+                          "total_tokens": u["prompt_tokens"] + u["completion_tokens"]}
+            r["bridge"] = {"finish_reason": self.reply["finish"] or ("tool_calls" if self.reply["calls"] else "stop")}
+        return r
 
     def stream_text(self, text, field="content"):
         step = max(6, len(text) // 300)  # long echoes (e.g. a big read result) stay a few seconds
@@ -213,8 +426,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def tool_call(self, name, args):
         raw = json.dumps(args)
+        call_id = f"call_{next(self.call_ids)}"  # unique, as a chained history holds many calls
         self.emit(chunk({"role": "assistant", "tool_calls": [
-            {"index": 0, "id": "call_1", "type": "function", "function": {"name": name, "arguments": ""}}]}))
+            {"index": 0, "id": call_id, "type": "function", "function": {"name": name, "arguments": ""}}]}))
         step = max(40, len(raw) // 100)  # big pages stream in ~100 chunks instead of hundreds
         for i in range(0, len(raw), step):
             self.emit(chunk({"tool_calls": [{"index": 0, "function": {"arguments": raw[i:i + step]}}]}))
@@ -275,6 +489,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_stream()
 
     def end_stream(self):
+        if self.dialect == "responses":
+            self.close_item()
+            self.event({"type": "response.completed", "response": self.response_object("completed")})
+            return
         if self.usage is not None:  # OpenAI placement: a final chunk with empty choices
             u = dict(self.usage, total_tokens=self.usage["prompt_tokens"] + self.usage["completion_tokens"])
             self.wfile.write(f"data: {json.dumps({'choices': [], 'usage': u})}\n\n".encode())
@@ -297,6 +515,9 @@ if __name__ == "__main__":
     ap.add_argument("--no-caps", action="store_true", help="report no modalities and no /props, like a barebones server")
     ap.add_argument("--models-delay", type=float, default=0.0, help="seconds before /models answers")
     ap.add_argument("--models-status", type=int, default=200, help="make /models fail with this status")
+    ap.add_argument("--no-responses", action="store_true", help="no /v1/responses route (plain-text 404)")
+    ap.add_argument("--stateless-responses", action="store_true", help="reject previous_response_id, answer store: false")
+    ap.add_argument("--forget-every", type=int, default=0, metavar="N", help="every Nth chained request: not found")
     a = ap.parse_args()
     Handler.key = a.key
     Handler.no_tools = a.no_tools
@@ -307,5 +528,8 @@ if __name__ == "__main__":
     Handler.no_caps = a.no_caps
     Handler.models_delay = a.models_delay
     Handler.models_status = a.models_status
+    Handler.no_responses = a.no_responses
+    Handler.stateless_responses = a.stateless_responses
+    Handler.forget_every = a.forget_every
     print(f"mock server on http://localhost:{a.port}/v1" + (f" (key: {a.key})" if a.key else ""))
     ThreadingHTTPServer(("127.0.0.1", a.port), Handler).serve_forever()
