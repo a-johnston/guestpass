@@ -82,7 +82,7 @@ export const OMITTED_MARKER = '[not page source';
 export const omittedHtml = (id) =>
   `${OMITTED_MARKER}: omitted from history after a later render of "${id}". Use read("${id}") for the current source.]`;
 
-/** Page HTML after "Clear media"; keeps OMITTED_MARKER so checkHtml rejects it as source. */
+/** Page HTML after "Compact"; keeps OMITTED_MARKER so checkHtml rejects it as source. */
 export const clearedHtml = (id) =>
   `${OMITTED_MARKER}: cleared from history. Use read("${id}") for the current source.]`;
 

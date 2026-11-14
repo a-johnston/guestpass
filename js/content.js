@@ -45,7 +45,7 @@ export function contentText(content, { placeholders = false } = {}) {
 }
 
 /**
- * "Clear media": marks every image and file part (meta.cleared) and every page render
+ * "Compact": marks every image and file part (meta.cleared) and every page render
  * (call.cleared) in the history so far. Marks rather than an index, so a later attachment merged
  * into an already-cleared user message is still sent.
  */
@@ -127,7 +127,7 @@ function moveToolImages(messages) {
 }
 
 /**
- * What "Clear media" would stop re-sending: images and files still sent (not cleared, not an
+ * What "Compact" would stop re-sending: images and files still sent (not cleared, not an
  * older screenshot of the same page) and page HTML not already stubbed.
  * bytes are wire size; tokens are estimates (images by basalt's 32 px tiles, text by chars).
  */

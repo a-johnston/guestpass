@@ -7,7 +7,7 @@ import { renderMarkdown } from './markdown.js';
 import { sessionToMarkdown, formatDuration, formatSeconds } from './session.js';
 import { prepareHistory, mergeContent, userContent, clearableSummary, markCleared, estimateTokens, shouldRebase } from './content.js';
 import { buildResponsesBody } from './responses.js';
-import { pickImageMime, canEncodeWebp, formatBytes } from './media.js';
+import { pickImageMime, canEncodeWebp } from './media.js';
 import { createAttachmentTray, mediaRow } from './attachments.js';
 import { fallbackFor } from './fallbacks.js';
 
@@ -534,7 +534,7 @@ function mediaUsed(history) {
 /**
  * A tool call as sent to the server. Once a widget/pane has been re-rendered under the same id,
  * the older call's HTML is replaced by a stub: the newer version is in context, and page HTML is
- * by far the largest thing in a widget-heavy history. "Clear media" (`cleared`) stubs it too.
+ * by far the largest thing in a widget-heavy history. "Compact" (`cleared`) stubs it too.
  * The local copy (and session.md) keep it all.
  */
 function forServer({ superseded, cleared, ...call }) {
@@ -546,11 +546,12 @@ function forServer({ superseded, cleared, ...call }) {
   return { ...call, function: { ...call.function, arguments: JSON.stringify(args) } };
 }
 
-/** The "Clear media" button by the context counter: shown while anything re-sent could be dropped. */
+/**
+ * The "Compact" button by the context counter: shown while anything re-sent could be dropped.
+ * Just the word, no size estimate, so the top bar fits on one row on more phones.
+ */
 function updateClearMedia() {
-  const { bytes, tokens } = clearableSummary(state.messages, { renderTools: RENDER_TOOLS, charsPerToken: state.charsPerToken });
-  el.clearMedia.hidden = bytes === 0;
-  el.clearMedia.textContent = `Clear media · ${formatBytes(bytes)}${tokens ? ` · ~${formatTokens(tokens)} tok` : ''}`;
+  el.clearMedia.hidden = clearableSummary(state.messages, { renderTools: RENDER_TOOLS }).bytes === 0;
 }
 
 function clearMedia() {
