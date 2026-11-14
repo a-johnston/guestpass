@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSSEParser, createAccumulator } from '../js/stream.js';
+import { createSSEParser, createAccumulator, createResponsesAccumulator } from '../js/stream.js';
 
 function collect(chunks) {
   const out = [];
@@ -78,4 +78,127 @@ test('accumulator accepts a non-streamed response (message instead of delta)', (
 test('accumulator throws on an in-stream error object', () => {
   const acc = createAccumulator();
   assert.throws(() => acc.apply({ error: { message: 'context length exceeded' } }), /context length/);
+});
+
+// Responses API events, as the proxy sends them.
+const created = (id = 'resp_1') => ({ type: 'response.created', response: { id, status: 'in_progress' } });
+const completed = (response) => ({ type: 'response.completed', response: { id: 'resp_1', store: true, status: 'completed', output: [], ...response } });
+
+test('responses: text, reasoning, usage, timings', () => {
+  const acc = createResponsesAccumulator();
+  acc.apply(created());
+  acc.apply({ type: 'response.reasoning_text.delta', item_id: 'rs_1', output_index: 0, delta: 'We' });
+  acc.apply({ type: 'response.reasoning_text.delta', item_id: 'rs_1', output_index: 0, delta: ' need' });
+  acc.apply({ type: 'response.output_text.delta', item_id: 'msg_1', output_index: 1, delta: 'Hel' });
+  acc.apply({ type: 'response.output_text.delta', item_id: 'msg_1', output_index: 1, delta: 'lo' });
+  acc.apply(completed({
+    output: [
+      { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'We need' }] },
+      { type: 'message', content: [{ type: 'output_text', text: 'Hello' }] },
+    ],
+    usage: { input_tokens: 103, output_tokens: 26, total_tokens: 129 },
+    bridge: { finish_reason: 'stop', timings: { predicted_per_second: 85.2 } },
+  }));
+  assert.deepEqual(acc.result(), {
+    content: 'Hello',
+    reasoning: 'We need',
+    toolCalls: [],
+    finishReason: 'stop',
+    usage: { prompt_tokens: 103, completion_tokens: 26, total_tokens: 129 },
+    timings: { predicted_per_second: 85.2 },
+    responseId: 'resp_1',
+    stored: true,
+  });
+});
+
+test('responses: reasoning summary deltas count as reasoning', () => {
+  const acc = createResponsesAccumulator();
+  acc.apply({ type: 'response.reasoning_summary_text.delta', delta: 'short' });
+  assert.equal(acc.result().reasoning, 'short');
+});
+
+test('responses: tool call', () => {
+  const acc = createResponsesAccumulator();
+  acc.apply(created());
+  acc.apply({ type: 'response.output_item.added', output_index: 1, item: { id: 'fc_1', type: 'function_call', call_id: 'call_2', name: 'get_time', arguments: '' } });
+  acc.apply({ type: 'response.function_call_arguments.delta', item_id: 'fc_1', output_index: 1, delta: '{"tz":' });
+  acc.apply({ type: 'response.function_call_arguments.delta', item_id: 'fc_1', output_index: 1, delta: '"UTC"}' });
+  acc.apply(completed({ output: [{ id: 'fc_1', type: 'function_call', call_id: 'call_2', name: 'get_time', arguments: '{"tz":"UTC"}' }] }));
+  const r = acc.result();
+  assert.deepEqual(r.toolCalls, [{ id: 'call_2', type: 'function', function: { name: 'get_time', arguments: '{"tz":"UTC"}' } }]);
+  assert.equal(r.finishReason, 'tool_calls');
+});
+
+test('responses: tool call arguments only in output_item.done', () => {
+  const acc = createResponsesAccumulator();
+  acc.apply({ type: 'response.output_item.added', output_index: 0, item: { id: 'fc_1', type: 'function_call', call_id: 'c', name: 'n', arguments: '' } });
+  acc.apply({ type: 'response.output_item.done', output_index: 0, item: { id: 'fc_1', type: 'function_call', call_id: 'c', name: 'n', arguments: '{"a":1}' } });
+  assert.deepEqual(acc.result().toolCalls, [{ id: 'c', type: 'function', function: { name: 'n', arguments: '{"a":1}' } }]);
+});
+
+test('responses: incomplete', () => {
+  const acc = createResponsesAccumulator();
+  acc.apply({ type: 'response.output_text.delta', delta: 'cut' });
+  acc.apply({ type: 'response.incomplete', response: { id: 'resp_1', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] } });
+  assert.equal(acc.result().finishReason, 'length');
+  assert.equal(acc.result().content, 'cut');
+});
+
+test('responses: store false is not chainable', () => {
+  const acc = createResponsesAccumulator();
+  acc.apply(created());
+  acc.apply(completed({ store: false }));
+  assert.equal(acc.result().stored, false);
+  const noId = createResponsesAccumulator();
+  noId.apply({ type: 'response.completed', response: { output: [] } });
+  assert.equal(noId.result().stored, false);
+});
+
+test('responses: failure throws', () => {
+  const acc = createResponsesAccumulator();
+  assert.throws(
+    () => acc.apply({ type: 'response.failed', response: { error: { message: 'boom', code: 'server_error' } } }),
+    (e) => e instanceof Error && e.message === 'boom' && e.code === 'server_error',
+  );
+  assert.throws(() => acc.apply({ type: 'error', message: 'bad', code: 'x' }), (e) => e.message === 'bad' && e.code === 'x');
+  assert.throws(() => acc.apply({ type: 'error', error: { message: 'nested' } }), /nested/);
+});
+
+test('responses: non-streaming body folds output', () => {
+  const output = [
+    { type: 'reasoning', content: [{ type: 'reasoning_text', text: 't' }] },
+    { type: 'message', content: [{ type: 'output_text', text: 'hi' }] },
+    { type: 'function_call', call_id: 'c', name: 'n', arguments: '{}' },
+  ];
+  const acc = createResponsesAccumulator();
+  acc.apply({ type: 'response.completed', response: { id: 'r', output } });
+  const r = acc.result();
+  assert.deepEqual([r.content, r.reasoning, r.responseId, r.stored], ['hi', 't', 'r', true]);
+  assert.deepEqual(r.toolCalls, [{ id: 'c', type: 'function', function: { name: 'n', arguments: '{}' } }]);
+
+  const streamed = createResponsesAccumulator();
+  streamed.apply({ type: 'response.reasoning_text.delta', delta: 't' });
+  streamed.apply({ type: 'response.output_text.delta', delta: 'hi' });
+  streamed.apply({ type: 'response.output_item.added', output_index: 2, item: { id: 'fc', type: 'function_call', call_id: 'c', name: 'n', arguments: '' } });
+  streamed.apply({ type: 'response.function_call_arguments.delta', item_id: 'fc', delta: '{}' });
+  streamed.apply({ type: 'response.completed', response: { id: 'r', output } });
+  const s = streamed.result();
+  assert.deepEqual([s.content, s.reasoning, s.toolCalls.length, s.toolCalls[0].function.arguments], ['hi', 't', 1, '{}'], 'not doubled');
+});
+
+test('responses: usage total falls back to input + output', () => {
+  const acc = createResponsesAccumulator();
+  acc.apply(completed({ usage: { input_tokens: 10, output_tokens: 5 } }));
+  assert.deepEqual(acc.result().usage, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+});
+
+test('responses: a call only in the final output is kept after streamed text', () => {
+  const acc = createResponsesAccumulator();
+  acc.apply({ type: 'response.output_text.delta', delta: 'hi' });
+  acc.apply({ type: 'response.completed', response: { id: 'r', output: [
+    { type: 'message', content: [{ type: 'output_text', text: 'hi' }] },
+    { type: 'function_call', call_id: 'c', name: 'n', arguments: '{}' },
+  ] } });
+  const r = acc.result();
+  assert.deepEqual([r.content, r.toolCalls.length, r.finishReason], ['hi', 1, 'tool_calls']);
 });
