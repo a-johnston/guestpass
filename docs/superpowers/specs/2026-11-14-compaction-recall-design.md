@@ -87,9 +87,22 @@ saves everything.
   This replaces today's `shouldRebase` check and reuses its bias-cancelling comparison of
   estimates against the reported figure. A compaction aims at the low mark (default ~33%: the sum
   of the budgets below), so the context runs between about a third and 60% full.
-- **Unknown size** (Claude's call): when the server reports no context size, or usage isn't
-  reported, automatic compaction is off, as `shouldRebase` is today. The Compact button still
-  works, using the budgets for a 128k context.
+- **Unknown size: learn it at the limit.** When the server reports no context size, automatic
+  compaction waits until the window is found by running into it. A response that ends with
+  `finish_reason: 'length'` (Responses: `bridge.finish_reason`, or `incomplete_details`) while
+  Guestpass sets no output cap means the context filled up, and the usage reported with it is the
+  window: in the saved session both read 131k. Guestpass then sets `state.context.max` from that
+  usage, shows it in the context counter, turns on automatic compaction, compacts, and continues
+  the turn once (a notice says so). If a later response reports more usage than the learned size,
+  the cut-off was an output cap on the server rather than the window (Claude's call): the learned
+  size is dropped and replaced by the new figure as a lower bound. Without usage reports the size
+  can't be learned; automatic compaction stays off and the Compact button uses the budgets for a
+  128k context.
+- **A response cut off mid tool call** (fixes an existing bug): the cut-off call's arguments are
+  unfinished JSON, and sending them back makes the server reject the next request (`HTTP 400:
+  Unterminated string…`; the empty `edit()` at the end of the saved session). Such a call is not
+  run; it stays in the local history but is sent with arguments `{}` and a result saying it was
+  cut off at the context limit and should be made again.
 - **Effect:** recompute the plan over the whole history, drop `state.chainHead`, send a full
   request. The plan freezes: items added afterwards are sent whole until the next compaction.
 - **Compact button:** "Compact" forces a compaction now, ignoring the marks, and clears media as
@@ -101,18 +114,22 @@ saves everything.
 
 ### What gets compacted, and how
 
-Budgets are in estimated tokens (`estimateTokens` units) and filled newest first: the newest items
-of a kind are kept whole until the kind's budget is spent; older ones are stubbed. All numbers live
-in one exported constants object.
+**One shared budget, split by weight.** A compaction has a single total to fill: the low mark,
+about a third of the context (~42k tokens on a 128k model; ~2.7k on the mock server's 8k, so
+compaction triggers there after a few scripted turns). Each kind gets a weighted share of it, and
+a kind that needs less than its share gives the rest to the others, in proportion to their
+weights, until every share is either used or full (weighted water-filling; deterministic). A
+session that never screenshots or never reads lends that room to its reasoning and edits, so the
+budget follows what the model actually uses. Within a kind, items are kept newest first until
+its share is spent; older ones are stubbed. All weights and sizes live in one exported constants
+object.
 
-Budgets scale with the model's context (Claude's call): each is stored as a fraction of it, and
-the table shows the values for a 128k (131,072-token) context. They sum to ~42k, about a third
-of the context, which is the low mark. On the mock server's 8k context they come to ~2.7k in
-all, so compaction triggers there after a few scripted turns. Per-block sizes (the 2k "plan"
-threshold, the 1k/3k plan head and tail, the 4k user-message cap, the ~200-character note cap)
-stay fixed.
+The column below shows each kind's share at a 128k context when every kind uses its full share;
+the weights are those numbers relative to each other. Per-block sizes (the 2k "plan" threshold,
+the 1k/3k plan head and tail, the 4k user-message cap, the ~200-character note cap) are fixed
+token counts, not shares.
 
-| Kind | Budget (default) | Stub |
+| Kind | Share at 128k (weight) | Stub |
 |---|---|---|
 | Reasoning, blocks ≤ 2k | 8k | first and last sentence (each ≤ ~30 words) + recall id |
 | Reasoning, blocks > 2k ("plans") | 4k | first ~1k and last ~3k tokens + recall id, for the newest that fit; older become ordinary reasoning stubs |
@@ -123,7 +140,7 @@ stay fixed.
 | Page source (`inline`/`pane` `html`), latest render per page | 10k | `[current source: read("id")]`; older renders are already stubbed by `superseded` |
 | Screenshots | latest per page (existing rule) | `[earlier screenshot of "id", recall r44]` |
 | Other tool calls and results | 2k | first/last line + recall id |
-| `recall` results | 3k, compacted first | `[recall result, recall r45]` |
+| `recall` results | 3k | `[recall result, recall r45]` |
 | Stubs (all kinds together) | 4k | oldest stubs fold into removed ranges (below) |
 | Notes | 1.5k | see Notes |
 
@@ -140,7 +157,7 @@ Rules that cut across kinds:
 
 ### Removed ranges (the hierarchy)
 
-When the stubs themselves exceed their budget, the oldest stubs (with their items) are removed
+When the stubs themselves exceed their share, the oldest stubs (with their items) are removed
 from what is sent and replaced by one marker per contiguous removed range:
 
 `[Steps 3–40 compacted (52 items). recall("index", "3-40") lists them.]`
@@ -157,7 +174,7 @@ exists; it changes only at a compaction.
   a recall id).
 - Notes are collected at each compaction into the Notes block, newest first, deduplicated by exact
   text; re-marking a note makes it newest again, so a finding the model keeps relying on stays.
-- Over the 1.5k budget, the block ends with `[14 older notes: recall("notes")]`.
+- Over its share, the block ends with `[14 older notes: recall("notes")]`.
 - A note's line is kept even when the item it came from is stubbed or removed.
 - `TOOL_SYSTEM_HINT` gains one short sentence: mark only lasting findings, one line each, with
   `Key:`; older steps may be compacted, and `recall` brings them back.
@@ -174,9 +191,9 @@ recall({ id?: string, search?: string, page?: integer })
 - `search`: a JavaScript regex, case-insensitive, over the original text of every item in the
   history; returns up to 20 hits per page as id, kind and a one-line snippet around the match.
 - Every result is capped at ~4k tokens, with "continue with page=N" when there is more.
-- Results are ordinary tool results appended to the history (never inflated in place) and have
-  their own budget, compacted before anything else, so a search spree evicts old recalls rather
-  than the model's recent working context.
+- Results are ordinary tool results appended to the history (never inflated in place) and are
+  their own kind with a small weight: they only borrow room other kinds aren't using, so a search
+  spree evicts old recalls rather than the model's recent working context.
 - `recall` is in the tool list only when tools are on, like the others; its description stays
   terse (the tool definitions are sent every request).
 
@@ -203,7 +220,8 @@ recall({ id?: string, search?: string, page?: integer })
 
 ## Testing and tuning
 
-- Unit tests for `compact.js`: budgets filled newest first; call/result pairing; latest and first
+- Unit tests for `compact.js`: shares split by weight, with unused shares lent to the others;
+  each kind filled newest first; call/result pairing; latest and first
   user message kept; notes collected, deduplicated, refreshed, capped; removed ranges and the
   synthetic message respecting alternation; determinism (same input, same plan); ids stable across
   a second compaction.
