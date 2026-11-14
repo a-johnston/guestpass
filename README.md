@@ -16,9 +16,9 @@ python3 dev/mock_server.py --key sk-test # fake API at http://localhost:8099/v1 
 node --test test/
 ```
 
-The mock server serves both `/v1/responses` (chaining in memory, like the proxy) and `/v1/chat/completions`, and prints one line per request (`prev=<previous_response_id> items=<n> bytes=<n>`). `--no-responses` drops the Responses route (chat completions only), `--stateless-responses` refuses `previous_response_id` like basalt, and `--forget-every N` forgets the chain on every Nth chained request.
+The mock server serves both `/v1/responses` (chaining in memory, like the proxy) and `/v1/chat/completions`, and prints one line per request (`prev=<previous_response_id> items=<n> bytes=<n>`). `--no-responses` drops the Responses route (chat completions only), `--stateless-responses` refuses `previous_response_id` like basalt, and `--forget-every N` forgets the chain on every Nth chained request. `--hide-ctx` hides the context size from `/models` and `/props`; `--ctx-limit N` streams a tool call cut off mid-string with a `length` finish and exactly N usage tokens once the rough prompt reaches N, and truncates output that would fill the remaining window. History tool-call arguments are always checked as JSON (invalid arguments return HTTP 400). Run the mock's HTTP regressions with `python3 -m unittest discover -s test -p '*_test.py'`.
 
-The mock server has scripted responses: `call:{"name":"patch","args":{…}}` makes it emit exactly that tool call, "slow" streams ~3s of reasoning (for testing queued messages), "pane" opens a pane, "inline" renders a widget, "think" streams reasoning, and anything else gets echoed back as markdown.
+The mock server has scripted responses: `call:{"name":"kv","args":{},"loop":true}` keeps reasoning and calling tools (for compaction and the round limit); `call:{"name":"patch","args":{…}}` makes it emit exactly that tool call, "slow" streams ~3s of reasoning (for testing queued messages), "pane" opens a pane, "inline" renders a widget, "think" streams reasoning, and anything else gets echoed back as markdown.
 
 ## License
 

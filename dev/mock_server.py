@@ -10,6 +10,9 @@ response once another one chains from it, like the proxy. Unknown ids get the pr
 --no-responses: /v1/responses is a plain-text 404 (route missing: clients fall back to chat).
 --stateless-responses: rejects `previous_response_id` with a 400 and answers `store: false`, like basalt.
 --forget-every N: every Nth chained request gets the not-found 404.
+--hide-ctx: omit n_ctx from /models and /props.
+--ctx-limit N: at N rough prompt tokens, stream a cut-off tool call and length finish.
+History tool-call arguments must always be valid JSON (otherwise HTTP 400).
 
 --no-tools rejects any request carrying `tools`, like llama-server without --jinja.
 --no-reasoning rejects requests whose messages carry `reasoning_content`.
@@ -26,7 +29,7 @@ Scripted behaviour, keyed off the last user message:
                     -> emits exactly that tool call (drive any tool from the chat box)
   contains "code"   -> replies with python, js, and unlabeled code blocks (for highlighting)
   call:{..., "loop": true}
-                    -> after each tool result, calls another tool (for the round limit)
+                    -> after each tool result, reasons and calls another tool (round limit/compaction)
   contains "long"   -> streams 80 paragraphs over ~4s (for auto-scroll tests)
   contains "slow"   -> streams reasoning for ~3s before answering (for queue/steering tests)
   contains "pane"   -> calls pane with a small canvas app (logs one console.error)
@@ -147,6 +150,10 @@ def chunk(delta, finish=None):
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
 
 
+class ContextLimit(Exception):
+    """Stop a scripted reply as soon as its output fills the remaining window."""
+
+
 class Handler(BaseHTTPRequestHandler):
     key = None
     no_tools = False
@@ -160,6 +167,8 @@ class Handler(BaseHTTPRequestHandler):
     no_responses = False
     stateless_responses = False
     forget_every = 0
+    hide_ctx = False
+    ctx_limit = 0
     usage = None
     dialect = "chat"
     # /v1/responses state, shared by all request threads.
@@ -200,7 +209,9 @@ class Handler(BaseHTTPRequestHandler):
         time.sleep(self.models_delay)
         if self.models_status != 200:
             return self.reject(self.models_status, "model list unavailable (--models-status)")
-        mock1 = {"id": "mock-1", "meta": {"n_ctx": 8192}}
+        mock1 = {"id": "mock-1"}
+        if not self.hide_ctx:
+            mock1["meta"] = {"n_ctx": 8192}
         if not self.no_caps:
             mock1["architecture"] = {"input_modalities": ["text"] if self.no_vision else ["text", "image"]}
         body = json.dumps({"object": "list", "data": [mock1, {"id": "mock-2"}]}).encode()
@@ -218,7 +229,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
         body = json.dumps({
-            "default_generation_settings": {"n_ctx": 8192},
+            "default_generation_settings": {} if self.hide_ctx else {"n_ctx": 8192},
             "modalities": {"vision": not self.no_vision},
             "basalt": {"version": "mock", "capabilities": [] if self.no_documents else ["documents"]},
         }).encode()
@@ -269,6 +280,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve(self, msgs, req, stream_options):
         """Checks the rejection flags, then streams a scripted reply in the request's dialect."""
+        try:
+            for m in msgs:
+                for call in m.get("tool_calls") or []:
+                    json.loads(call.get("function", {}).get("arguments", ""))
+        except (json.JSONDecodeError, TypeError) as e:
+            return self.reject(400, str(e))
         has_tools = bool(req.get("tools"))
         if has_tools and self.no_tools:
             return self.reject(500, "tools param requires --jinja flag")
@@ -282,10 +299,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.reject(400, "unsupported content part type: file")
         # Rough token count (4 chars/token) so the client's context counter has numbers to show.
         self.usage = None
-        if stream_options.get("include_usage"):
-            # Tool definitions take context too.
-            prompt = len(json.dumps(msgs)) + len(json.dumps(req.get("tools") or []))
-            self.usage = {"prompt_tokens": prompt // 4, "completion_tokens": 0}
+        # Tool definitions take context too, even when usage wasn't requested.
+        prompt = (len(json.dumps(msgs)) + len(json.dumps(req.get("tools") or []))) // 4
+        at_limit = self.ctx_limit > 0 and prompt >= self.ctx_limit
+        if stream_options.get("include_usage") or self.ctx_limit > 0:
+            self.usage = {"prompt_tokens": self.ctx_limit if at_limit else prompt, "completion_tokens": 0}
+        self.output_chars = 0
+        self.forced_limit = at_limit
         self.reply = {"content": "", "reasoning": "", "calls": [], "finish": None}
         self.items = []  # Responses output items; the last one may still be open
         self.send_response(200)
@@ -296,7 +316,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.dialect == "responses":
                 self.event({"type": "response.created", "response": self.response_object("in_progress")})
-            self.respond(msgs, has_tools)
+            if at_limit:
+                self.emit(chunk({"role": "assistant", "tool_calls": [
+                    {"index": 0, "id": f"call_{next(self.call_ids)}", "type": "function",
+                     "function": {"name": "edit", "arguments": '{"id": "a'}}]}))
+                self.emit(chunk({}, "length"))
+                self.end_stream()
+            else:
+                self.respond(msgs, has_tools)
+        except ContextLimit:
+            self.end_stream()
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
@@ -337,15 +366,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def emit(self, obj, split=True):
         """Sends a chat chunk, or on /responses the equivalent Responses events."""
+        cut_off = False
         for c in obj.get("choices", []):
             d = c.get("delta", {})
-            if self.usage is not None:
-                self.usage["completion_tokens"] += len(d.get("content") or "") // 4 + len(d.get("reasoning_content") or "") // 4
+            if self.usage is not None and not self.forced_limit:
+                fields = [(d, "content"), (d, "reasoning_content")]
+                fields += [(tc.get("function", {}), "arguments") for tc in d.get("tool_calls") or []]
+                for owner, key in fields:
+                    text = owner.get(key) or ""
+                    if self.ctx_limit > 0:
+                        available = max(0, (self.ctx_limit - self.usage["prompt_tokens"]) * 4 - self.output_chars)
+                        if len(text) > available:
+                            owner[key] = text = text[:available]
+                            cut_off = True
+                    self.output_chars += len(text)
+                self.usage["completion_tokens"] = self.output_chars // 4
+            if cut_off:
+                c["finish_reason"] = "length"
             self.record(d, c.get("finish_reason"))
             if self.dialect == "responses":
                 self.translate(d)
         if self.dialect == "chat":
             self.send(f"data: {json.dumps(obj)}\n\n".encode(), split)
+        if cut_off:
+            raise ContextLimit
 
     def send(self, data, split=True):
         parts = [data[: len(data) // 2], data[len(data) // 2:]] if split else [data]
@@ -444,8 +488,13 @@ class Handler(BaseHTTPRequestHandler):
                          and not text_of(m.get("content")).startswith(IMAGE_CARRIER)), {})
         user = text_of(user_msg.get("content"))
         received = media_note(user_msg)
-        key = user.split("\n\n")[-1]  # the client merges queued messages into one user turn
+        # The client merges user messages, and may append a compaction block to the first one.
+        scripted = [s for s in user.split("\n\n") if not s.startswith("[Compacted history]")]
+        key = scripted[-1] if scripted else ""
         if last.get("role") == "tool" and has_tools and key.startswith("call:") and json.loads(key[5:]).get("loop"):
+            # Real tool loops accumulate reasoning, not just JSON envelopes. Give the compactor
+            # actual content to budget, keeping this in one chunk so smoke tests remain fast.
+            self.emit(chunk({"reasoning_content": "I will inspect the shared state, check the last result, and keep working on the user's task. " * 8}))
             self.tool_call("kv", {})  # never satisfied: keeps calling tools until the client's round limit
             return self.end_stream()
         elif last.get("role") == "tool" or carrier:
@@ -520,6 +569,8 @@ if __name__ == "__main__":
     ap.add_argument("--no-responses", action="store_true", help="no /v1/responses route (plain-text 404)")
     ap.add_argument("--stateless-responses", action="store_true", help="reject previous_response_id, answer store: false")
     ap.add_argument("--forget-every", type=int, default=0, metavar="N", help="every Nth chained request: not found")
+    ap.add_argument("--hide-ctx", action="store_true", help="omit the context window from /models and /props")
+    ap.add_argument("--ctx-limit", type=int, default=0, metavar="N", help="cut off a tool call at N rough prompt tokens")
     a = ap.parse_args()
     Handler.key = a.key
     Handler.no_tools = a.no_tools
@@ -533,5 +584,7 @@ if __name__ == "__main__":
     Handler.no_responses = a.no_responses
     Handler.stateless_responses = a.stateless_responses
     Handler.forget_every = a.forget_every
+    Handler.hide_ctx = a.hide_ctx
+    Handler.ctx_limit = a.ctx_limit
     print(f"mock server on http://localhost:{a.port}/v1" + (f" (key: {a.key})" if a.key else ""))
     ThreadingHTTPServer(("127.0.0.1", a.port), Handler).serve_forever()
