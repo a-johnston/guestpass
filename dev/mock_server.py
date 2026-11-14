@@ -283,7 +283,9 @@ class Handler(BaseHTTPRequestHandler):
         # Rough token count (4 chars/token) so the client's context counter has numbers to show.
         self.usage = None
         if stream_options.get("include_usage"):
-            self.usage = {"prompt_tokens": len(json.dumps(msgs)) // 4, "completion_tokens": 0}
+            # Tool definitions take context too.
+            prompt = len(json.dumps(msgs)) + len(json.dumps(req.get("tools") or []))
+            self.usage = {"prompt_tokens": prompt // 4, "completion_tokens": 0}
         self.reply = {"content": "", "reasoning": "", "calls": [], "finish": None}
         self.items = []  # Responses output items; the last one may still be open
         self.send_response(200)
