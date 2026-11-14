@@ -712,7 +712,11 @@ async function runTurn() {
         try {
           output = await runTool(call.function.name, call.function.arguments, {
             mountInline: (w) => mountInlineWidget(view, chip, w),
-            inline: { has: (id) => state.inline.has(id), remove: (id) => removeInlineWidget(id, 'removed') },
+            inline: {
+              has: (id) => state.inline.has(id),
+              remove: (id) => removeInlineWidget(id, 'removed'),
+              expand: (id) => { const e = state.inline.get(id); if (e) setWidgetCollapsed(e.card, false); },
+            },
             canRerender: (id) => state.inline.has(id) || panes.has(id),
             rerender: rerenderPage,
             listPages,
@@ -779,7 +783,7 @@ function rerenderPage(id, html) {
   const entry = state.inline.get(id);
   if (entry) {
     entry.widget = { ...entry.widget, html };
-    const card = widgetCard(entry.widget);
+    const card = widgetCard({ ...entry.widget, collapsed: entry.card.classList.contains('collapsed') });
     entry.card.replaceWith(card);
     entry.card = card;
   } else if (panes.has(id)) {
@@ -1054,23 +1058,40 @@ function createAssistantView() {
   };
 }
 
-function widgetCard({ id, title, html, height }) {
-  const maxH = Math.max(80, Math.min(Number(height) || 480, 2000));
+/** A frame's height before the page reports one; a page that fills its window keeps it. */
+const WIDGET_START_PX = 480;
+
+/**
+ * An inline widget: a title bar that collapses it on click, over a frame sized to its page's
+ * content. Collapsing shrinks a wrapper, not the frame, so the page keeps its viewport and never
+ * reports a bogus height (a full-window page would otherwise stick at whatever it saw hidden).
+ */
+function widgetCard({ id, title, html, collapsed = false }) {
   const fig = h('figure', 'widget');
   const cap = h('figcaption');
-  cap.append(h('span', 'widget-title', title || 'Widget'));
+  const label = h('button', 'widget-title', title || 'Widget');
+  label.type = 'button';
   const pop = h('button', 'icon-btn', '⧉');
   pop.type = 'button';
   pop.title = 'Open in side pane';
-  pop.addEventListener('click', () => panes.open(`${id}-pane`, title || id, html));
-  cap.append(pop);
+  pop.addEventListener('click', (e) => { e.stopPropagation(); panes.open(`${id}-pane`, title || id, html); });
+  cap.append(label, pop);
+  cap.addEventListener('click', () => setWidgetCollapsed(fig, !fig.classList.contains('collapsed')));
   const frame = createFrame(id, html, {
     title: title || id,
-    onResize: (px) => { frame.style.height = `${Math.min(Math.max(px, 40), maxH)}px`; },
+    onResize: (px) => { frame.style.height = `${Math.max(px, 40)}px`; },
   });
-  frame.style.height = `${Math.min(160, maxH)}px`;
-  fig.append(cap, frame);
+  frame.style.height = `${WIDGET_START_PX}px`;
+  const body = h('div', 'widget-body');
+  body.append(frame);
+  fig.append(cap, body);
+  setWidgetCollapsed(fig, collapsed);
   return fig;
+}
+
+function setWidgetCollapsed(fig, on) {
+  fig.classList.toggle('collapsed', on);
+  fig.querySelector('.widget-title').setAttribute('aria-expanded', String(!on));
 }
 
 function truncate(s, n) {

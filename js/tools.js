@@ -19,11 +19,10 @@ const fn = (name, description, properties, required) => ({
 
 export const TOOL_DEFS = [
   fn('inline', 'Render an HTML widget in the chat.', {
-    html: htmlParam,
-    id: { type: 'string', description: 'optional' },
+    id: idParam,
     title: { type: 'string' },
-    height: { type: 'integer', description: 'Max px (default 480)' },
-  }, ['html']),
+    html: htmlParam,
+  }, ['id', 'html']),
   fn('pane', 'Open HTML in a pane beside the chat.', {
     id: { type: 'string' },
     title: { type: 'string' },
@@ -102,8 +101,8 @@ let autoId = 0;
 
 /**
  * Executes a tool call. `ui` supplies the DOM side:
- *   ui.mountInline({id, title, html, height}) — adds a widget card to the current reply, replacing any widget with that id
- *   ui.inline — {has(id), remove(id)} for inline widgets
+ *   ui.mountInline({id, title, html}) — adds a widget card to the current reply, replacing any widget with that id
+ *   ui.inline — {has(id), remove(id), expand(id)} for inline widgets
  *   ui.panes — the pane manager (open/close/has/ids)
  *   ui.canRerender(id) / ui.rerender(id, html) — reload a widget or pane in place with new source (edit)
  *   ui.imageMime() — the format screenshots are encoded in
@@ -129,11 +128,13 @@ export async function runTool(name, rawArgs, ui) {
     case 'inline': {
       const bad = checkHtml(args.html);
       if (bad) return bad;
-      const id = sanitizeId(args.id) || `widget-${++autoId}`;
+      // No made-up ids: an anonymous draft followed by a named final render left both on screen.
+      const id = sanitizeId(args.id);
+      if (!id) return 'Error: "id" is required.';
       // Never silently swap a page's kind: replacing a pane with a widget lost a whole app once.
       if (ui.panes.has(id)) return `Error: "${id}" is open as a pane. Use pane to replace it, or close it first.`;
       const replaced = ui.inline.has(id);
-      ui.mountInline({ id, title: args.title, html: args.html, height: args.height });
+      ui.mountInline({ id, title: args.title, html: args.html });
       await settle(id);
       return `${replaced ? 'Replaced' : 'Rendered'} widget "${id}".\nConsole:\n${consoleOf(id)}`;
     }
@@ -226,6 +227,7 @@ export async function runTool(name, rawArgs, ui) {
       const id = sanitizeId(args.id);
       const isPane = ui.panes.has(id);
       if (!getFrame(id) || !(isPane || ui.inline.has(id))) return `Error: no widget or pane with id "${id}".`;
+      if (!isPane) ui.inline.expand(id); // "as the user sees it": a collapsed widget is shown first
       if (isPane) {
         ui.panes.focus(id); // a pane behind another tab has no layout to draw
         // Let it lay out. Background browser tabs never run animation frames, hence the timer.

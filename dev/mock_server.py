@@ -478,7 +478,7 @@ class Handler(BaseHTTPRequestHandler):
             self.tool_call("pane", {"id": "bouncer", "title": "Bouncer", "html": PANE_HTML})
             return self.end_stream()
         elif has_tools and "inline" in key.lower():
-            self.tool_call("inline", {"title": "SVG demo", "html": INLINE_HTML})
+            self.tool_call("inline", {"id": "svg-demo", "title": "SVG demo", "html": INLINE_HTML})
             return self.end_stream()
         else:
             if "think" in key.lower():

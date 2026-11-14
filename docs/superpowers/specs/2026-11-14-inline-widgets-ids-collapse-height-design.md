@@ -50,8 +50,9 @@ it if a model still sends it. A widget frame starts at 480px, then takes the hei
 reports, with no upper bound (minimum 40px). A page that fills its window reports exactly the
 frame's height, so it stays at 480px with no special detection.
 
-**Collapse.** A toggle button (▾ expanded / ▸ collapsed) in each widget's caption; clicking it hides
-the frame and leaves the caption. Collapsed widgets keep running and stay addressable by every
+**Collapse.** Clicking a widget's title bar (anything but its pop-out button) toggles it between
+expanded and collapsed to the title bar; no extra toggle symbol. The title is a button carrying
+`aria-expanded` so the toggle is keyboard reachable. Collapsed widgets keep running and stay addressable by every
 tool. `edit` keeps the current collapsed state; a fresh render of the id (replacement) starts
 expanded. `screenshot` of a collapsed widget expands it first, as it already focuses a hidden pane.
 Applies to the "▶ Run" code-preview cards too, since they share `widgetCard`.

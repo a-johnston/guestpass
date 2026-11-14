@@ -210,7 +210,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 .widget { margin: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
 .widget figcaption { display: flex; align-items: center; padding: 4px 6px 4px 12px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--border); }
-.widget-title { flex: 1; }
+.widget figcaption { cursor: pointer; user-select: none; }
+.widget-title { flex: 1; min-width: 0; text-align: left; background: transparent; border: 0; padding: 0; color: inherit; font: inherit; cursor: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.widget.collapsed figcaption { border-bottom-color: transparent; }
+/* Collapsing hides the wrapper, not the frame, so the page keeps its size while out of sight. */
+.widget.collapsed .widget-body { height: 0; overflow: hidden; }
 .widget iframe { display: block; width: 100%; border: 0; background: #fff; transition: height .15s; }
 
 /* ---------- composer */
