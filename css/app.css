@@ -323,6 +323,7 @@ body.resizing iframe { pointer-events: none; }
 #setup-form h1 { margin: 0; font-size: 22px; }
 #setup-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; }
 #setup-form label > input, #setup-form label > textarea, #setup-form label > select { font-weight: normal; }
+#cfg-system { resize: vertical; }
 #setup-form small, .hint { font-weight: normal; color: var(--muted); font-size: 12px; margin: 0; }
 .hint:empty { display: none; }
 .hint[data-kind="ok"] { color: var(--ok); }
