@@ -54,9 +54,10 @@
           </button>
           <div id="opts" class="popover" role="dialog" aria-label="Options" hidden>
             <fieldset>
-              <legend>Thinking returned to the model</legend>
+              <legend>Thinking kept when compacting</legend>
               <label><input type="radio" name="think-mode" value="all" checked /> All turns</label>
               <label><input type="radio" name="think-mode" value="turn" /> Current turn only</label>
+              <p class="muted small">Applied when history is compacted; new steps are sent whole until then.</p>
             </fieldset>
           </div>
         </div>

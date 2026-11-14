@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeContent, contentText, prepareHistory, fence, userContent, clearableSummary, markCleared, estimateTokens, shouldRebase } from '../js/content.js';
+import { mergeContent, coalesceMessages, contentText, prepareHistory, fence, userContent, clearableSummary, markCleared, estimateTokens } from '../js/content.js';
 
 const URL = 'data:image/webp;base64,AAAA';
 const img = (name, extra = {}) => ({ type: 'image_url', image_url: { url: URL }, meta: { kind: 'attachment', name, bytes: 27, mime: 'image/webp', ...extra } });
@@ -14,6 +14,24 @@ test('mergeContent joins strings and promotes to parts', () => {
   assert.equal(mergeContent('a', 'b'), 'a\n\nb');
   assert.deepEqual(mergeContent('a', [img('x.png')]), [{ type: 'text', text: 'a' }, img('x.png')]);
   assert.deepEqual(mergeContent([img('x.png')], 'b'), [img('x.png'), { type: 'text', text: 'b' }]);
+});
+
+test('coalesceMessages preserves assistant text, reasoning, calls and content parts', () => {
+  const ms = [
+    { role: 'assistant', content: 'first', reasoning_content: 'reason one' },
+    { role: 'assistant', content: [img('x.png'), { type: 'text', text: 'second' }], reasoning_content: 'reason two', tool_calls: [call('a'), call('b')] },
+    { role: 'tool', tool_call_id: 'a', content: 'a result' },
+    { role: 'tool', tool_call_id: 'b', content: 'b result' },
+    { role: 'assistant', content: 'after tools' },
+  ];
+  const saved = structuredClone(ms);
+  const out = coalesceMessages(ms);
+  assert.deepEqual(out.map((m) => m.role), ['assistant', 'tool', 'tool', 'assistant']);
+  assert.equal(contentText(out[0].content), 'first\n\nsecond');
+  assert.equal(out[0].content[1].type, 'image_url');
+  assert.equal(out[0].reasoning_content, 'reason one\n\nreason two');
+  assert.deepEqual(out[0].tool_calls.map((c) => c.id), ['a', 'b']);
+  assert.deepEqual(ms, saved);
 });
 
 test('userContent: text alone stays a string; attachments make parts', () => {
@@ -40,7 +58,7 @@ test('strips meta and leaves the input untouched', () => {
   assert.ok(msgs[0].content[1].meta, 'local copy keeps meta');
 });
 
-test('only the latest screenshot per page is sent', () => {
+test('prepareHistory sends every screenshot between compactions', () => {
   const msgs = [
     { role: 'assistant', content: '', tool_calls: [call('c1'), call('c2'), call('c3')] },
     { role: 'tool', tool_call_id: 'c1', content: [{ type: 'text', text: 'one' }, shot('app')] },
@@ -48,7 +66,7 @@ test('only the latest screenshot per page is sent', () => {
     { role: 'tool', tool_call_id: 'c3', content: [{ type: 'text', text: 'three' }, shot('app')] },
   ];
   const out = prepareHistory(msgs, ON);
-  assert.equal(out[1].content, 'one\n\n[earlier screenshot of "app" omitted; a newer one follows]');
+  assert.deepEqual(out[1].content, [{ type: 'text', text: 'one' }, sent()]);
   assert.deepEqual(out[2].content, [{ type: 'text', text: 'two' }, sent()]);
   assert.deepEqual(out[3].content, [{ type: 'text', text: 'three' }, sent()]);
 });
@@ -187,21 +205,9 @@ test('estimateTokens: text by chars, images at their 1 MP cap, tool calls and re
   assert.equal(estimateTokens([{ role: 'user', content: 'abcdefgh' }]), 2, 'defaults to 4 chars per token');
 });
 
-test('shouldRebase: near the limit, and only when it frees enough', () => {
-  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 60 }), true);
-  assert.equal(shouldRebase({ used: 70, max: 100, trimmed: 10 }), false, 'under 75%');
-  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 75 }), false, 'saves under 10%');
-  assert.equal(shouldRebase({ used: null, max: 100, trimmed: 0 }), false);
-  assert.equal(shouldRebase({ used: 80, max: null, trimmed: 0 }), false);
-});
-
-test('shouldRebase: no repeat after a rebase (the server then holds the trimmed history)', () => {
-  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 79 }), false);
-});
-
-test('shouldRebase: with held, the trimmed estimate is scaled to the server\'s count', () => {
-  // The estimate runs at half the server's count: unscaled, 80 - 40 would look like a 40% saving.
-  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 40, held: 40 }), false, 'nothing trimmed since the server got it');
-  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 30, held: 40 }), true, 'a quarter of 80 freed');
-  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 38, held: 40 }), false, '4 of 80 freed');
+test('prepareHistory strips local call fields and sanitizes cut-off arguments', () => {
+  const c = { id: 'c', type: 'function', function: { name: 'edit', arguments: '{"id":"a' }, superseded: true, cleared: true, cutOff: true };
+  const msgs = [{ role: 'assistant', content: '', tool_calls: [c] }];
+  assert.deepEqual(prepareHistory(msgs)[0].tool_calls, [{ id: 'c', type: 'function', function: { name: 'edit', arguments: '{}' } }]);
+  assert.equal(c.function.arguments, '{"id":"a');
 });

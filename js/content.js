@@ -21,6 +21,22 @@ export function mergeContent(a, b) {
   return [...asParts(a), ...asParts(b)];
 }
 
+/** Merge dialogue runs exposed by compaction/filtering, but never merge tool results. */
+export function coalesceMessages(messages) {
+  const out = [];
+  for (const m of messages) {
+    const previous = out.at(-1);
+    if ((m.role === 'user' || m.role === 'assistant') && previous?.role === m.role) {
+      const merged = { ...previous, content: mergeContent(previous.content ?? '', m.content ?? '') };
+      const reasoning = [previous.reasoning_content, m.reasoning_content].filter(Boolean).join('\n\n');
+      if (reasoning) merged.reasoning_content = reasoning;
+      if (previous.tool_calls || m.tool_calls) merged.tool_calls = [...(previous.tool_calls || []), ...(m.tool_calls || [])];
+      out[out.length - 1] = merged;
+    } else out.push(m);
+  }
+  return out;
+}
+
 /** A user message's content: the text alone, or text plus attachment parts. */
 export function userContent(text, parts = []) {
   if (!parts.length) return text;
@@ -76,15 +92,11 @@ function latestShots(messages) {
  *   toolImages: false moves images out of tool results into a user message after them
  */
 export function prepareHistory(messages, { vision = null, documents = true, toolImages = true } = {}) {
-  const lastShot = latestShots(messages);
   const shaped = messages.map((m) => {
     if (!Array.isArray(m.content)) return { ...m };
     const content = m.content.map((p) => {
       if (!isMedia(p)) return p;
       if (p.meta?.cleared) return textPart(`[${mediaLabel(p)} — cleared from history]`);
-      if (p.meta?.kind === 'screenshot' && lastShot.get(p.meta.pageId) !== p) {
-        return textPart(`[earlier screenshot of "${p.meta.pageId}" omitted; a newer one follows]`);
-      }
       if (p.type === 'image_url' && vision === false) return textPart(`[${mediaLabel(p)} — not sent, this model can't see images]`);
       if (p.type === 'file' && documents === false) {
         return typeof p.meta?.text === 'string'
@@ -159,6 +171,10 @@ export function clearableSummary(messages, { renderTools, charsPerToken = 4 }) {
 
 /** Drops local meta; a part array that is only text again becomes a plain string. */
 function finalize(m) {
+  if (m.tool_calls) m = { ...m, tool_calls: m.tool_calls.map((c) => ({
+    id: c.id, type: c.type,
+    function: { ...c.function, ...(c.cutOff ? { arguments: '{}' } : {}) },
+  })) };
   if (!Array.isArray(m.content)) return m;
   const parts = m.content.map(({ meta, ...p }) => p);
   return { ...m, content: parts.every((p) => p.type === 'text') ? parts.map((p) => p.text).join('\n\n') : parts };
@@ -169,7 +185,7 @@ const IMAGE_TOKENS = 1024;
 
 /**
  * Rough token count of prepared (sent-shape) messages: text, reasoning and tool-call arguments by
- * chars, images at their size cap, files by decoded size. For deciding on a rebase, not billing.
+ * chars, images at their size cap, files by decoded size. For deciding on compaction, not billing.
  */
 export function estimateTokens(messages, { charsPerToken = 4 } = {}) {
   let chars = 0;
@@ -189,15 +205,3 @@ export function estimateTokens(messages, { charsPerToken = 4 } = {}) {
   return Math.round(chars / charsPerToken) + images * IMAGE_TOKENS;
 }
 
-/**
- * Whether to drop the chain and resend the trimmed history: the context (`used`, as last
- * reported) is at least 75% of `max`, and the resend (`trimmed`, estimated) frees at least 10%.
- * With `held`, an estimate of the context the server holds made the same way as `trimmed`,
- * `trimmed` is scaled by used/held first, so the estimate's bias cancels out: right after a
- * rebase held equals trimmed and it can't fire again until something new becomes trimmable.
- */
-export function shouldRebase({ used, max, trimmed, held }) {
-  if (!(used > 0) || !(max > 0)) return false;
-  const resend = held > 0 ? trimmed * (used / held) : trimmed;
-  return used >= 0.75 * max && used - resend >= 0.10 * max;
-}

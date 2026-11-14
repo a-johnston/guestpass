@@ -2,13 +2,14 @@
 // iframes, either inline in the chat or in a side pane. Widgets and panes ("pages") share one
 // id namespace; rendering an id that already exists replaces it.
 //
-// The definitions and TOOL_SYSTEM_HINT are sent with every request and there is no compaction,
-// so they are deliberately terse (~840 tokens on a Qwen template, of which ~540 is the template's
+// The definitions and TOOL_SYSTEM_HINT are sent with every request, so they are deliberately terse (~840 tokens on a Qwen template, of which ~540 is the template's
 // fixed tool wrapper). Facts shared by all pages live once in the hint; descriptions state only
 // what a model can't infer. Measure before growing them.
 import { getFrame, settle, formatLogs, patchFrame, updateKv, captureFrame } from './frames.js';
 import { applyEdit, applyLineEdit, numberLines, scriptSyntaxErrors } from './source.js';
 import { compressImage, IMAGE_QUALITY } from './media.js';
+import { OMITTED_MARKER, omittedHtml, clearedHtml } from './compact.js';
+export { OMITTED_MARKER, omittedHtml, clearedHtml };
 
 const idParam = { type: 'string', description: 'Page id' };
 const htmlParam = { type: 'string', description: 'Fragment or full document' };
@@ -52,6 +53,11 @@ export const TOOL_DEFS = [
     id: idParam,
     wait: { type: 'integer', description: 'ms to wait for new output (max 5000)' },
   }, ['id']),
+  fn('recall', 'Get back compacted history: an item by id (from a stub, "notes", or "index:A-B"), or search it with a regex.', {
+    id: { type: 'string' },
+    search: { type: 'string' },
+    page: { type: 'integer' },
+  }),
 ];
 
 /** Only offered when the model may be able to see images. */
@@ -69,22 +75,11 @@ export const TOOL_SYSTEM_HINT = 'Your tools can render web pages here: use them 
   'Defining window.onPatch = (data) => result lets the patch tool update a page in place. ' +
   'Inline and pane pages share one id namespace: reusing an id replaces the existing one. ' +
   'Each page is a single-file app: build large ones incrementally, starting small and then using edit. ' +
-  'inline, pane, edit, and patch return console output.';
+  'inline, pane, edit, and patch return console output. ' +
+  'Older steps may be compacted into stubs with recall ids: recall brings any of them back, or searches the history. Start a line with "Key:" to keep a lasting finding (one line each, only what you will need later).';
 
 /** Tools that render a page (and so can supersede an earlier render of the same id). */
 export const RENDER_TOOLS = new Set(['inline', 'pane']);
-
-/**
- * What a superseded render's HTML is replaced with in the history sent to the model. Worded so it
- * can't pass for source: a model once copied the old placeholder back in as a page's HTML.
- */
-export const OMITTED_MARKER = '[not page source';
-export const omittedHtml = (id) =>
-  `${OMITTED_MARKER}: omitted from history after a later render of "${id}". Use read("${id}") for the current source.]`;
-
-/** Page HTML after "Compact"; keeps OMITTED_MARKER so checkHtml rejects it as source. */
-export const clearedHtml = (id) =>
-  `${OMITTED_MARKER}: cleared from history. Use read("${id}") for the current source.]`;
 
 function checkHtml(html) {
   if (typeof html !== 'string' || !html.trim()) return 'Error: "html" is required.';
@@ -125,6 +120,8 @@ export async function runTool(name, rawArgs, ui) {
   };
 
   switch (name) {
+    case 'recall':
+      return ui.recall(args);
     case 'inline': {
       const bad = checkHtml(args.html);
       if (bad) return bad;
@@ -187,6 +184,9 @@ export async function runTool(name, rawArgs, ui) {
       return truncate(`${note}${fresh.length ? formatLogs(fresh) : `(no new console output${waitMs ? ` after ${waitMs} ms` : ''})`}`);
     }
     case 'edit': {
+      if (typeof args.new === 'string' && args.new.includes(OMITTED_MARKER)) {
+        return 'Error: that replacement contains a history placeholder, not page source. Use read(id) to get the current source.';
+      }
       const id = sanitizeId(args.id);
       const f = getFrame(id);
       if (!f || !ui.canRerender(id)) return `Error: no widget or pane with id "${id}".`;

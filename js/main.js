@@ -1,15 +1,18 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
 import { listModels, streamChat, fetchProps, fetchStatus, capabilitiesFrom, chainRecovery } from './api.js';
-import { toolDefs, TOOL_SYSTEM_HINT, RENDER_TOOLS, omittedHtml, clearedHtml, runTool, sanitizeId } from './tools.js';
+import { toolDefs, TOOL_SYSTEM_HINT, RENDER_TOOLS, runTool, sanitizeId } from './tools.js';
 import { createFrame, removeFrame, getFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
 import { sessionToMarkdown, formatDuration, formatSeconds } from './session.js';
-import { prepareHistory, mergeContent, userContent, clearableSummary, markCleared, estimateTokens, shouldRebase } from './content.js';
+import { prepareHistory, mergeContent, coalesceMessages, userContent, clearableSummary, markCleared, estimateTokens } from './content.js';
+import { normalizeToolIds } from './items.js';
 import { buildResponsesBody } from './responses.js';
 import { pickImageMime, canEncodeWebp } from './media.js';
 import { createAttachmentTray, mediaRow } from './attachments.js';
 import { fallbackFor } from './fallbacks.js';
+import { compactHistory, shouldCompact, learnWindow, COMPACTION } from './compact.js';
+import { runRecall } from './recall.js';
 
 const MAX_TOOL_ROUNDS = 25; // granular tools (edit/read) take more rounds; Continue resumes past it
 
@@ -32,17 +35,18 @@ const state = {
   // then it is dropped for the rest of the session (see FALLBACKS).
   toolsSupported: true,
   sendReasoning: true, // reasoning_content on assistant messages (see thinkingMode)
-  thinkingMode: 'all', // 'turn': current turn only; 'all': every turn (options popover)
+  thinkingMode: 'all', // at compaction: 'turn' keeps only the current turn; 'all' keeps every turn
   requestUsage: true, // stream_options.include_usage, for the context counter
   toolImages: true, // images inside tool results; off: sent in a user message after them
   // From /models and /props at connect. vision: null = not reported (tried until rejected).
   caps: { vision: null, documents: false, basalt: false },
-  context: { used: null, max: null },
+  context: { used: null, max: null, reported: false, floor: 0 },
+  compaction: null, // {messages, upTo}: independent send-shape snapshot; local history stays whole
   // Which API the server speaks, detected per connection: 'responses' until /responses turns out
   // to be missing. chain: whether it keeps responses for previous_response_id (null = not known yet).
   api: { dialect: 'responses', chain: null },
   // The last response the server keeps: the next request sends only messages from index `sent`
-  // on. held estimates the context the server holds (see shouldRebase). Null: send everything.
+  // on. held estimates the context the server holds (see shouldCompact). Null: send everything.
   /** @type {{id:string, sent:number, held:number} | null} */
   chainHead: null,
   conn: 'pending', // model list: 'pending' (messages queue) | 'ok' | 'failed'
@@ -144,6 +148,8 @@ async function connect() {
     const caps = capabilitiesFrom(models[0] ?? {}, props, status);
     state.caps = { vision: caps.vision, documents: caps.documents, basalt: caps.basalt };
     state.context.max = caps.contextLength;
+    state.context.reported = caps.contextLength != null;
+    state.context.floor = 0;
     updateContext();
     if (state.queue.length && !state.busy) runTurn();
   } catch (e) {
@@ -451,28 +457,21 @@ function pushUser(text, parts = []) {
 
 // ---------------------------------------------------------------- conversation
 
-/**
- * The history as sent, from message `from` on: thinking per the rules below, tool calls with
- * superseded/cleared HTML stubbed, tool messages dropped when tools are off, then prepareHistory.
- */
+/** Frozen prefix plus whole live messages: nothing in the middle shifts between compactions. */
 function sendableHistory(from, toolsOn) {
-  // Thinking: assistant messages keep it locally (for the transcript). It goes back to the server
-  // only for the current turn (after the last user message), so the model keeps its plan across a
-  // tool loop; earlier turns' thinking is dropped, the usual practice for reasoning models.
-  const lastUser = state.messages.findLastIndex((m) => m.role === 'user');
-  let history = state.messages.map(({ reasoning, thinkingMs, ...m }, i) => {
-    if (m.tool_calls) m.tool_calls = m.tool_calls.map(forServer);
-    if (reasoning && state.sendReasoning && (state.thinkingMode === 'all' || i > lastUser)) m.reasoning_content = reasoning;
-    return m;
-  }).slice(from); // before prepareHistory: moving tool images changes the message count
+  const { messages: frozen = [], upTo = 0 } = state.compaction || {};
+  const live = state.messages.slice(Math.max(from, upTo)).map(({ reasoning, thinkingMs, ...m }) => ({
+    ...m, ...(reasoning && state.sendReasoning ? { reasoning_content: reasoning } : {}),
+  }));
+  let history = [...(from < upTo ? frozen : []), ...live];
   if (!toolsOn) {
-    // Servers reject tool messages when no tools are declared; strip them from the history.
-    history = history
-      .filter((m) => m.role !== 'tool')
-      .map((m) => (m.tool_calls ? { role: m.role, content: m.content } : m))
-      .filter((m) => m.role !== 'assistant' || m.content);
+    history = history.filter((m) => m.role !== 'tool')
+      .map(({ tool_calls, ...m }) => m)
+      .filter((m) => m.role !== 'assistant' || m.content || m.reasoning_content);
   }
-  // Media: drops older screenshots, applies capability fallbacks, strips local metadata.
+  // Dropped messages can expose either dialogue-role boundary. Reused server call ids
+  // also need unique wire ids on full sends; results-only chain tails keep their server ids.
+  history = normalizeToolIds(coalesceMessages(history));
   return prepareHistory(history, {
     vision: state.caps.vision,
     documents: state.caps.documents,
@@ -480,8 +479,24 @@ function sendableHistory(from, toolsOn) {
   });
 }
 
+const compactionCandidate = () => compactHistory(state.messages, {
+  window: state.context.max ?? COMPACTION.nominalWindow,
+  thinkingMode: state.thinkingMode, sendReasoning: state.sendReasoning, tools: state.toolsSupported,
+});
+
+function adoptCompaction(reason, candidate = compactionCandidate()) {
+  state.compaction = { messages: candidate.messages, upTo: candidate.upTo };
+  state.chainHead = null;
+  const before = formatTokens(candidate.before), after = formatTokens(candidate.after);
+  if (reason === 'limit') {
+    notice(`Reached the context limit at ${formatTokens(state.context.max)}. Compacted the history sent to the model (~${before} → ~${after} tokens) and continued.`);
+  } else if (reason !== 'quiet') {
+    notice(`Compacted the history sent to the model: ~${before} → ~${after} tokens. The chat still shows everything.`);
+  }
+}
+
 // Fixed units, not the calibrated state.charsPerToken: held is summed over many requests and must
-// stay comparable with a fresh estimate; shouldRebase scales both to the server's count anyway.
+// stay comparable with a fresh estimate; shouldCompact scales both to the server's count anyway.
 const estimate = (messages) => estimateTokens(messages);
 
 /**
@@ -490,8 +505,8 @@ const estimate = (messages) => estimateTokens(messages);
  *   used    media the request carries (for fallbackFor)
  *   chained whether it relies on the chain head
  *   held    estimated tokens the server will hold once it has the input (instructions and tools excluded)
- *   rebase  for a chained request, {held, trimmed}: estimates, instructions and tools included, of
- *           the context the chained request makes and of a full resend instead (see shouldRebase)
+ *   rebase  for a chained request, {held}: estimate including instructions and tools
+ *   fixed   estimated instructions and tools, shared by the candidate and held comparison
  */
 function buildRequest() {
   const toolsOn = state.toolsSupported;
@@ -510,12 +525,9 @@ function buildRequest() {
     if (state.requestUsage) body.stream_options = { include_usage: true };
   }
   const held = (head?.held ?? 0) + estimate(history);
-  let rebase = null;
-  if (head) {
-    const fixed = estimate([{ role: 'system', content: system + (tools ? JSON.stringify(tools) : '') }]);
-    rebase = { held: fixed + held, trimmed: fixed + estimate(sendableHistory(0, toolsOn)) };
-  }
-  return { body, used: mediaUsed(history), chained: !!head, held, rebase };
+  const fixed = estimate([{ role: 'system', content: system + (tools ? JSON.stringify(tools) : '') }]);
+  const rebase = head ? { held: fixed + held } : null;
+  return { body, used: mediaUsed(history), chained: !!head, held, fixed, rebase };
 }
 
 /** Which kinds of media a request carries, so a rejection can be pinned on the right one. */
@@ -532,40 +544,24 @@ function mediaUsed(history) {
 }
 
 /**
- * A tool call as sent to the server. Once a widget/pane has been re-rendered under the same id,
- * the older call's HTML is replaced by a stub: the newer version is in context, and page HTML is
- * by far the largest thing in a widget-heavy history. "Compact" (`cleared`) stubs it too.
- * The local copy (and session.md) keep it all.
- */
-function forServer({ superseded, cleared, ...call }) {
-  if (!superseded && !cleared) return call;
-  let args;
-  try { args = JSON.parse(call.function.arguments); } catch { return call; }
-  if (typeof args.html !== 'string') return call;
-  args.html = superseded ? omittedHtml(args.id) : clearedHtml(args.id);
-  return { ...call, function: { ...call.function, arguments: JSON.stringify(args) } };
-}
-
-/**
  * The "Compact" button by the context counter: shown while anything re-sent could be dropped.
  * Just the word, no size estimate, so the top bar fits on one row on more phones.
  */
 function updateClearMedia() {
-  el.clearMedia.hidden = clearableSummary(state.messages, { renderTools: RENDER_TOOLS }).bytes === 0;
+  const media = clearableSummary(state.messages, { renderTools: RENDER_TOOLS }).items > 0;
+  if (media) { el.clearMedia.hidden = false; return; }
+  const candidate = compactionCandidate();
+  const compacted = candidate.after + estimate(sendableHistory(candidate.upTo, state.toolsSupported));
+  el.clearMedia.hidden = estimate(sendableHistory(0, state.toolsSupported)) - compacted < 1000;
 }
 
 function clearMedia() {
   markCleared(state.messages, RENDER_TOOLS);
+  adoptCompaction('manual');
   updateClearMedia();
-  // The server's copy of a chain still holds the media: start a new chain without it.
-  const chaining = !!state.chainHead;
-  state.chainHead = null;
-  notice(chaining
-    ? 'Cleared media: the next message re-sends the history without it. The chat still shows it.'
-    : 'Cleared media from what is sent to the model. The chat still shows it.');
 }
 
-/** Marks earlier renders of `id` as superseded by `latest` (see forServer). */
+/** Marks earlier renders of `id` as superseded by `latest` (honoured at compaction). */
 function markSuperseded(id, latest) {
   for (const m of state.messages) {
     for (const c of m.tool_calls || []) {
@@ -595,6 +591,7 @@ async function runTurn() {
   setBusy(true);
   state.stopRequested = false;
   let rounds = 0;
+  let continuedAtLimit = false; // one recovery per run prevents a no-progress retry loop
   try {
     for (;;) {
       const queued = takeQueue();
@@ -624,12 +621,16 @@ async function runTurn() {
       const started = performance.now();
       let firstToken = 0; // first real output (role-only / empty chunks don't count)
       let req = buildRequest();
-      if (req.chained && shouldRebase({ used: state.context.used, max: state.context.max, ...req.rebase })) {
-        // Near the context limit: start a new chain, sending the trimmed history.
-        state.chainHead = null;
-        notice('Re-sent the history without superseded pages and older screenshots to free context.');
-        req = buildRequest();
+      if (state.context.max && state.context.used >= COMPACTION.highMark * state.context.max) {
+        const candidate = compactionCandidate();
+        const compacted = req.fixed + candidate.after + estimate(sendableHistory(candidate.upTo, state.toolsSupported));
+        const held = req.rebase?.held ?? req.fixed + estimate(sendableHistory(0, state.toolsSupported));
+        if (shouldCompact({ used: state.context.used, max: state.context.max, held, compacted })) {
+          adoptCompaction('auto', candidate);
+          req = buildRequest();
+        }
       }
+      const snapshot = state.compaction;
       const { body, used, chained, held } = req;
       const { dialect } = state.api;
       try {
@@ -672,6 +673,7 @@ async function runTurn() {
           state.chainHead = null; // the server's copy holds what it now can't take
           if (fallback.caps) state.caps[fallback.key] = false;
           else state[fallback.key] = false;
+          if (state.compaction) adoptCompaction('quiet');
           view.remove();
           if (fallback.notice) notice(fallback.notice, 'warn');
           rounds--;
@@ -685,6 +687,16 @@ async function runTurn() {
         const u = result.usage;
         state.context.used = u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0);
         calibrateCharsPerToken(result, u);
+        if (!state.context.reported) Object.assign(state.context, learnWindow(state.context, { finishReason: result.finishReason, used: state.context.used }));
+      }
+      // A default output cap can also finish with 'length'. Only fresh usage near the
+      // window justifies compacting or adding a context-limit nudge to the transcript.
+      const atContextLimit = result.finishReason === 'length' && result.usage &&
+        state.context.max > 0 && state.context.used >= COMPACTION.limitMark * state.context.max;
+      if (result.finishReason === 'length') {
+        for (const call of result.toolCalls) {
+          try { JSON.parse(call.function.arguments); } catch { call.cutOff = true; }
+        }
       }
       updateContext(); // exact figure replaces the live estimate (or clears it if usage wasn't sent)
 
@@ -698,20 +710,23 @@ async function runTurn() {
       if (dialect === 'responses') {
         if (state.api.chain !== false) state.api.chain = result.stored;
         const reply = { role: 'assistant', content: result.content, reasoning_content: result.reasoning, tool_calls: result.toolCalls };
-        state.chainHead = result.stored && state.api.chain
+        // A results-only delta cannot repair reused ids in the server's stored history.
+        // Fall back to the full send, where both sides can be assigned unique wire ids.
+        const callIds = new Set(result.toolCalls.map((c) => c.id));
+        const uniqueCalls = callIds.size === result.toolCalls.length;
+        const reusedCalls = callIds.size > 0 && state.messages.some((previous) => previous !== msg &&
+          previous.tool_calls?.some((c) => callIds.has(c.id)));
+        state.chainHead = result.stored && state.api.chain && uniqueCalls && !reusedCalls && snapshot === state.compaction && !result.toolCalls.some((c) => c.cutOff)
           ? { id: result.responseId, sent: state.messages.length, held: held + estimate([reply]) }
           : null;
       }
-      if (!result.toolCalls.length) {
-        if (state.queue.length && !state.stopRequested) continue;
-        return;
-      }
-
       for (const call of result.toolCalls) {
         const chip = view.addToolCall(call);
         let output;
         try {
-          output = await runTool(call.function.name, call.function.arguments, {
+          output = call.cutOff
+            ? `Error: this call was cut off at the ${atContextLimit ? 'context' : 'output'} limit and was not run. Make it again.`
+            : await runTool(call.function.name, call.function.arguments, {
             mountInline: (w) => mountInlineWidget(view, chip, w),
             inline: {
               has: (id) => state.inline.has(id),
@@ -723,6 +738,7 @@ async function runTurn() {
             listPages,
             panes,
             imageMime,
+            recall: (args) => runRecall(state.messages, args),
           });
         } catch (e) {
           output = `Error: ${e.message}`;
@@ -747,6 +763,16 @@ async function runTurn() {
         updateClearMedia();
       }
       if (state.stopRequested) return;
+      if (atContextLimit && !continuedAtLimit) {
+        continuedAtLimit = true;
+        adoptCompaction('limit');
+        if (!result.toolCalls.length) pushUser('Your previous reply was cut off at the context limit. Older history has been compacted; continue where you left off.');
+        continue;
+      }
+      if (!result.toolCalls.length) {
+        if (state.queue.length) continue;
+        return;
+      }
     }
   } finally {
     state.stream = null;
