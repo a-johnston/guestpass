@@ -1,5 +1,6 @@
-// Minimal client for an OpenAI-compatible API (chat completions + model list).
-import { createSSEParser, createAccumulator } from './stream.js';
+// Minimal client for an OpenAI-compatible API: the model list, and replies streamed from either
+// the Responses API or chat completions (the "dialect"), plus classifiers for their errors.
+import { createSSEParser, createAccumulator, createResponsesAccumulator } from './stream.js';
 
 function headers(apiKey) {
   const h = { 'Content-Type': 'application/json' };
@@ -107,16 +108,38 @@ export function capabilitiesFrom(model, props, status = null) {
 }
 
 /**
- * Streams one chat completion. onUpdate receives the partial accumulated message
- * ({content, reasoning, toolCalls}) as it arrives. Resolves to the final message.
+ * A request failed because the server has no such route (a bare 404/405 page), as opposed to an
+ * error from a route that exists: the proxy answers an unknown model with a JSON 404.
  */
-export async function streamChat({ baseUrl, apiKey, body, signal, onUpdate }) {
+export function isMissingRoute(err) {
+  return (err?.status === 404 || err?.status === 405) && !err.apiError;
+}
+
+/**
+ * Why a request carrying previous_response_id failed, if because of it: 'not_found' (the server
+ * forgot that response: resend the full history) or 'unsupported' (the server can't chain).
+ */
+export function chainError(err) {
+  if (err?.code === 'previous_response_not_found') return 'not_found';
+  if (!(err?.status >= 400 && err.status < 500) || !/previous_response_id/i.test(err.message)) return null;
+  return /not found|evicted/i.test(err.message) ? 'not_found' : 'unsupported';
+}
+
+/**
+ * Streams one reply. dialect 'chat' posts to /chat/completions; 'responses' posts `body` as is
+ * to /responses. onUpdate receives the partial accumulated reply ({content, reasoning,
+ * toolCalls, …}) as it arrives. Resolves to the final reply; for 'responses' it also carries
+ * responseId and stored. HTTP errors carry status, the API's error code, and apiError (the body
+ * was a JSON error object, i.e. the route exists).
+ */
+export async function streamChat({ baseUrl, apiKey, body, signal, onUpdate, dialect = 'chat' }) {
+  const responses = dialect === 'responses';
   let res;
   try {
-    res = await fetch(`${baseUrl}/chat/completions`, {
+    res = await fetch(`${baseUrl}/${responses ? 'responses' : 'chat/completions'}`, {
       method: 'POST',
       headers: headers(apiKey),
-      body: JSON.stringify({ ...body, stream: true }),
+      body: JSON.stringify(responses ? body : { ...body, stream: true }),
       signal,
     });
   } catch (e) {
@@ -125,16 +148,24 @@ export async function streamChat({ baseUrl, apiKey, body, signal, onUpdate }) {
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     let msg = text;
-    try { msg = JSON.parse(text).error?.message || text; } catch {}
-    const err = new Error(`HTTP ${res.status}: ${msg.slice(0, 500) || res.statusText}`);
+    let apiErr = null;
+    try {
+      const e = JSON.parse(text).error;
+      if (e && typeof e === 'object') apiErr = e;
+      msg = e?.message || text;
+    } catch {}
+    const err = new Error(`HTTP ${res.status}: ${String(msg).slice(0, 500) || res.statusText}`);
     err.status = res.status;
+    err.apiError = !!apiErr;
+    if (apiErr?.code) err.code = apiErr.code;
     throw err;
   }
 
-  const acc = createAccumulator();
+  const acc = responses ? createResponsesAccumulator() : createAccumulator();
   const type = res.headers.get('content-type') || '';
   if (!type.includes('text/event-stream') && type.includes('json')) {
-    acc.apply(await res.json()); // server ignored stream:true
+    const json = await res.json(); // server ignored stream:true
+    acc.apply(responses ? { type: 'response.completed', response: json } : json);
     onUpdate?.(acc.result());
     return acc.result();
   }
