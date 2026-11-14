@@ -1,0 +1,9 @@
+# devbox project manifest. Paths are relative to this file.
+version = 1
+
+[image]
+containerfile = ".devbox/Containerfile"
+context = ".devbox"                   # keep source, .git and worktrees out of builds
+
+[environment]
+PYTHONDONTWRITEBYTECODE = "1"           # keep dev/__pycache__ out of the shared tree
