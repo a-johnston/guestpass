@@ -1,11 +1,12 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
-import { listModels, streamChat, fetchProps, fetchStatus, capabilitiesFrom } from './api.js';
+import { listModels, streamChat, fetchProps, fetchStatus, capabilitiesFrom, chainRecovery } from './api.js';
 import { toolDefs, TOOL_SYSTEM_HINT, RENDER_TOOLS, omittedHtml, clearedHtml, runTool, sanitizeId } from './tools.js';
 import { createFrame, removeFrame, getFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
 import { renderMarkdown } from './markdown.js';
 import { sessionToMarkdown, formatDuration, formatSeconds } from './session.js';
-import { prepareHistory, mergeContent, userContent, clearableSummary, markCleared } from './content.js';
+import { prepareHistory, mergeContent, userContent, clearableSummary, markCleared, estimateTokens, shouldRebase } from './content.js';
+import { buildResponsesBody } from './responses.js';
 import { pickImageMime, canEncodeWebp, formatBytes } from './media.js';
 import { createAttachmentTray, mediaRow } from './attachments.js';
 import { fallbackFor } from './fallbacks.js';
@@ -37,6 +38,13 @@ const state = {
   // From /models and /props at connect. vision: null = not reported (tried until rejected).
   caps: { vision: null, documents: false, basalt: false },
   context: { used: null, max: null },
+  // Which API the server speaks, detected per connection: 'responses' until /responses turns out
+  // to be missing. chain: whether it keeps responses for previous_response_id (null = not known yet).
+  api: { dialect: 'responses', chain: null },
+  // The last response the server keeps: the next request sends only messages from index `sent`
+  // on. held estimates the context the server holds (see shouldRebase). Null: send everything.
+  /** @type {{id:string, sent:number, held:number} | null} */
+  chainHead: null,
   conn: 'pending', // model list: 'pending' (messages queue) | 'ok' | 'failed'
   charsPerToken: 4, // streamed chars per output token, calibrated from usage; for live estimates
   messages: [],
@@ -118,6 +126,8 @@ const CONNECT_TIMEOUT_MS = 10000;
  */
 async function connect() {
   state.conn = 'pending';
+  state.api = { dialect: 'responses', chain: null };
+  state.chainHead = null;
   setStatus('pending', 'Connecting…');
   updatePlaceholder();
   const { baseUrl, apiKey } = state.cfg;
@@ -441,9 +451,11 @@ function pushUser(text, parts = []) {
 
 // ---------------------------------------------------------------- conversation
 
-function buildRequest() {
-  const toolsOn = state.toolsSupported;
-  const system = [state.cfg.system, toolsOn && TOOL_SYSTEM_HINT].filter(Boolean).join('\n\n');
+/**
+ * The history as sent, from message `from` on: thinking per the rules below, tool calls with
+ * superseded/cleared HTML stubbed, tool messages dropped when tools are off, then prepareHistory.
+ */
+function sendableHistory(from, toolsOn) {
   // Thinking: assistant messages keep it locally (for the transcript). It goes back to the server
   // only for the current turn (after the last user message), so the model keeps its plan across a
   // tool loop; earlier turns' thinking is dropped, the usual practice for reasoning models.
@@ -452,7 +464,7 @@ function buildRequest() {
     if (m.tool_calls) m.tool_calls = m.tool_calls.map(forServer);
     if (reasoning && state.sendReasoning && (state.thinkingMode === 'all' || i > lastUser)) m.reasoning_content = reasoning;
     return m;
-  });
+  }).slice(from); // before prepareHistory: moving tool images changes the message count
   if (!toolsOn) {
     // Servers reject tool messages when no tools are declared; strip them from the history.
     history = history
@@ -461,16 +473,49 @@ function buildRequest() {
       .filter((m) => m.role !== 'assistant' || m.content);
   }
   // Media: drops older screenshots, applies capability fallbacks, strips local metadata.
-  history = prepareHistory(history, {
+  return prepareHistory(history, {
     vision: state.caps.vision,
     documents: state.caps.documents,
     toolImages: state.toolImages,
   });
-  const body = { messages: system ? [{ role: 'system', content: system }, ...history] : history };
-  if (state.cfg.model) body.model = state.cfg.model;
-  if (toolsOn) body.tools = toolDefs({ vision: state.caps.vision });
-  if (state.requestUsage) body.stream_options = { include_usage: true };
-  return { body, used: mediaUsed(history) };
+}
+
+// Fixed units, not the calibrated state.charsPerToken: held is summed over many requests and must
+// stay comparable with a fresh estimate; shouldRebase scales both to the server's count anyway.
+const estimate = (messages) => estimateTokens(messages);
+
+/**
+ * The next request. On a chaining server it sends only the messages after state.chainHead, with
+ * previous_response_id; otherwise the whole history, trimmed. Besides the body:
+ *   used    media the request carries (for fallbackFor)
+ *   chained whether it relies on the chain head
+ *   held    estimated tokens the server will hold once it has the input (instructions and tools excluded)
+ *   rebase  for a chained request, {held, trimmed}: estimates, instructions and tools included, of
+ *           the context the chained request makes and of a full resend instead (see shouldRebase)
+ */
+function buildRequest() {
+  const toolsOn = state.toolsSupported;
+  const system = [state.cfg.system, toolsOn && TOOL_SYSTEM_HINT].filter(Boolean).join('\n\n');
+  const tools = toolsOn ? toolDefs({ vision: state.caps.vision }) : undefined;
+  const responses = state.api.dialect === 'responses';
+  const head = responses && state.api.chain !== false && state.chainHead?.sent < state.messages.length ? state.chainHead : null;
+  const history = sendableHistory(head ? head.sent : 0, toolsOn);
+  let body;
+  if (responses) {
+    body = buildResponsesBody({ instructions: system, messages: history, tools, model: state.cfg.model, previousResponseId: head?.id });
+  } else {
+    body = { messages: system ? [{ role: 'system', content: system }, ...history] : history };
+    if (state.cfg.model) body.model = state.cfg.model;
+    if (tools) body.tools = tools;
+    if (state.requestUsage) body.stream_options = { include_usage: true };
+  }
+  const held = (head?.held ?? 0) + estimate(history);
+  let rebase = null;
+  if (head) {
+    const fixed = estimate([{ role: 'system', content: system + (tools ? JSON.stringify(tools) : '') }]);
+    rebase = { held: fixed + held, trimmed: fixed + estimate(sendableHistory(0, toolsOn)) };
+  }
+  return { body, used: mediaUsed(history), chained: !!head, held, rebase };
 }
 
 /** Which kinds of media a request carries, so a rejection can be pinned on the right one. */
@@ -511,7 +556,12 @@ function updateClearMedia() {
 function clearMedia() {
   markCleared(state.messages, RENDER_TOOLS);
   updateClearMedia();
-  notice('Cleared media from what is sent to the model. The chat still shows it.');
+  // The server's copy of a chain still holds the media: start a new chain without it.
+  const chaining = !!state.chainHead;
+  state.chainHead = null;
+  notice(chaining
+    ? 'Cleared media: the next message re-sends the history without it. The chat still shows it.'
+    : 'Cleared media from what is sent to the model. The chat still shows it.');
 }
 
 /** Marks earlier renders of `id` as superseded by `latest` (see forServer). */
@@ -572,12 +622,21 @@ async function runTurn() {
       let result;
       const started = performance.now();
       let firstToken = 0; // first real output (role-only / empty chunks don't count)
-      const { body, used } = buildRequest();
+      let req = buildRequest();
+      if (req.chained && shouldRebase({ used: state.context.used, max: state.context.max, ...req.rebase })) {
+        // Near the context limit: start a new chain, sending the trimmed history.
+        state.chainHead = null;
+        notice('Re-sent the history without superseded pages and older screenshots to free context.');
+        req = buildRequest();
+      }
+      const { body, used, chained, held } = req;
+      const { dialect } = state.api;
       try {
         result = await streamChat({
           baseUrl: state.cfg.baseUrl,
           apiKey: state.cfg.apiKey,
           body,
+          dialect,
           signal: ctrl.signal,
           onUpdate: (p) => {
             if (!firstToken && (p.content || p.reasoning || p.toolCalls.length)) firstToken = performance.now();
@@ -597,8 +656,19 @@ async function runTurn() {
           if (state.interrupt && !state.stopRequested) continue;
           return;
         }
+        // Retried silently on another path: chat completions, or the full history.
+        const recovery = chainRecovery(e, { dialect, chained });
+        if (recovery) {
+          if (recovery === 'use_chat') state.api.dialect = 'chat';
+          if (recovery === 'stop_chaining') state.api.chain = false;
+          state.chainHead = null;
+          view.remove();
+          rounds--;
+          continue;
+        }
         const fallback = fallbackFor(e, used, fallbackOn);
         if (fallback) {
+          state.chainHead = null; // the server's copy holds what it now can't take
           if (fallback.caps) state.caps[fallback.key] = false;
           else state[fallback.key] = false;
           view.remove();
@@ -624,6 +694,13 @@ async function runTurn() {
       const msg = withThinking({ role: 'assistant', content: result.content }, result.reasoning, view);
       if (result.toolCalls.length) msg.tool_calls = result.toolCalls;
       state.messages.push(msg);
+      if (dialect === 'responses') {
+        if (state.api.chain !== false) state.api.chain = result.stored;
+        const reply = { role: 'assistant', content: result.content, reasoning_content: result.reasoning, tool_calls: result.toolCalls };
+        state.chainHead = result.stored && state.api.chain
+          ? { id: result.responseId, sent: state.messages.length, held: held + estimate([reply]) }
+          : null;
+      }
       if (!result.toolCalls.length) {
         if (state.queue.length && !state.stopRequested) continue;
         return;

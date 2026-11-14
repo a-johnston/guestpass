@@ -126,6 +126,18 @@ export function chainError(err) {
 }
 
 /**
+ * How to retry a failed request on another path, or null if nothing changes:
+ *   'use_chat'      the server has no /responses: switch to chat completions
+ *   'resend'        the server forgot the chain head: resend the full history
+ *   'stop_chaining' the server refuses previous_response_id: resend the full history, always
+ */
+export function chainRecovery(err, { dialect, chained }) {
+  if (dialect === 'responses' && isMissingRoute(err)) return 'use_chat';
+  if (!chained) return null;
+  return { not_found: 'resend', unsupported: 'stop_chaining' }[chainError(err)] ?? null;
+}
+
+/**
  * Streams one reply. dialect 'chat' posts to /chat/completions; 'responses' posts `body` as is
  * to /responses. onUpdate receives the partial accumulated reply ({content, reasoning,
  * toolCalls, …}) as it arrives. Resolves to the final reply; for 'responses' it also carries

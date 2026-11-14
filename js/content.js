@@ -192,8 +192,12 @@ export function estimateTokens(messages, { charsPerToken = 4 } = {}) {
 /**
  * Whether to drop the chain and resend the trimmed history: the context (`used`, as last
  * reported) is at least 75% of `max`, and the resend (`trimmed`, estimated) frees at least 10%.
+ * With `held`, an estimate of the context the server holds made the same way as `trimmed`,
+ * `trimmed` is scaled by used/held first, so the estimate's bias cancels out: right after a
+ * rebase held equals trimmed and it can't fire again until something new becomes trimmable.
  */
-export function shouldRebase({ used, max, trimmed }) {
+export function shouldRebase({ used, max, trimmed, held }) {
   if (!(used > 0) || !(max > 0)) return false;
-  return used >= 0.75 * max && used - trimmed >= 0.10 * max;
+  const resend = held > 0 ? trimmed * (used / held) : trimmed;
+  return used >= 0.75 * max && used - resend >= 0.10 * max;
 }

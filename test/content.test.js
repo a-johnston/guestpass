@@ -198,3 +198,10 @@ test('shouldRebase: near the limit, and only when it frees enough', () => {
 test('shouldRebase: no repeat after a rebase (the server then holds the trimmed history)', () => {
   assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 79 }), false);
 });
+
+test('shouldRebase: with held, the trimmed estimate is scaled to the server\'s count', () => {
+  // The estimate runs at half the server's count: unscaled, 80 - 40 would look like a 40% saving.
+  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 40, held: 40 }), false, 'nothing trimmed since the server got it');
+  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 30, held: 40 }), true, 'a quarter of 80 freed');
+  assert.equal(shouldRebase({ used: 80, max: 100, trimmed: 38, held: 40 }), false, '4 of 80 freed');
+});

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { capabilitiesFrom, streamChat, isMissingRoute, chainError } from '../js/api.js';
+import { capabilitiesFrom, streamChat, isMissingRoute, chainError, chainRecovery } from '../js/api.js';
 
 test('vision from the model entry wins over /props', () => {
   const caps = capabilitiesFrom({ inputModalities: ['text'] }, { modalities: { vision: true } });
@@ -105,4 +105,17 @@ test('streamChat error fields', async () => {
     await assert.rejects(streamChat({ baseUrl: 'http://x/v1', body: {}, dialect: 'responses' }),
       (e) => e.status === 404 && e.apiError === false && e.message === 'HTTP 404: Not Found');
   });
+});
+
+test('chainRecovery: what a failed request means for the dialect and the chain', () => {
+  const missing = err({ status: 404, apiError: false, message: 'HTTP 404: Not Found' });
+  const notFound = err({ status: 404, apiError: true, code: 'previous_response_not_found', message: NOT_FOUND_MSG });
+  const unsupported = err({ status: 400, apiError: true, message: 'HTTP 400: previous_response_id is not supported; send the whole conversation' });
+  assert.equal(chainRecovery(missing, { dialect: 'responses', chained: false }), 'use_chat');
+  assert.equal(chainRecovery(missing, { dialect: 'chat', chained: false }), null, 'chat has no fallback');
+  assert.equal(chainRecovery(err({ status: 404, apiError: true, code: 'model_not_found' }), { dialect: 'responses', chained: false }), null);
+  assert.equal(chainRecovery(notFound, { dialect: 'responses', chained: true }), 'resend');
+  assert.equal(chainRecovery(notFound, { dialect: 'responses', chained: false }), null, 'a full request that fails is an ordinary error');
+  assert.equal(chainRecovery(unsupported, { dialect: 'responses', chained: true }), 'stop_chaining');
+  assert.equal(chainRecovery(err({ status: 400, message: 'HTTP 400: bad image' }), { dialect: 'responses', chained: true }), null);
 });
