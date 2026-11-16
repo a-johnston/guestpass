@@ -72,21 +72,30 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 /* ---------- top bar */
 #topbar {
-  position: relative; /* the options popover hangs from the bar, not the gear: see .popover */
+  position: relative; /* the context popover hangs from the bar, not the counter: see .popover */
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
 }
 .brand { font-size: 15px; }
 .spacer { flex: 1; }
 .status { display: inline-flex; align-items: center; padding: 4px; }
-.ctx { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ctx {
+  font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap;
+  background: transparent; border: none; padding: 4px 6px; border-radius: 6px;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.ctx:hover, .ctx[aria-expanded="true"] { background: var(--surface-2); }
 .ctx[data-level="mid"] { color: var(--warn); }
 .ctx[data-level="high"] { color: var(--danger); }
-.clear-media {
-  font-size: 12px; padding: 2px 8px; border-radius: 6px; color: var(--muted); background: transparent;
-  border-color: var(--border); font-variant-numeric: tabular-nums; white-space: nowrap;
-}
-.clear-media:hover { color: var(--text); background: var(--surface-2); }
+/* Compacting would help: the cue the top-bar Compact button used to give by appearing. */
+.ctx[data-compact="yes"]::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+.ctx-stats { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+.ctx-stats dt { color: var(--muted); }
+.ctx-stats dd { margin: 0; font-variant-numeric: tabular-nums; }
+.ctx-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.ctx-compact { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.clear-media { font-size: 13px; padding: 4px 12px; border-color: var(--border); }
+.clear-media:hover { background: var(--border); }
 .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .status[data-state="ok"] .dot { background: var(--ok); }
 .status[data-state="warn"] .dot { background: var(--warn); }
@@ -279,17 +288,15 @@ body.resizing iframe { pointer-events: none; }
 .pane-view[hidden] { display: none; }
 .pane-view iframe { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
 #topbar .icon-btn { font-size: 18px; padding: 4px 6px; display: inline-flex; align-items: center; border-radius: 6px; }
-#opts-btn, .repo-link { color: var(--muted); text-decoration: none; }
-#opts-btn:hover, #opts-btn[aria-expanded="true"] { color: var(--text); }
+.repo-link { color: var(--muted); text-decoration: none; }
 .repo-link:hover { color: var(--text); }
 #setup-form a { color: var(--accent); }
 
 .topbar-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
-.opts-wrap { display: inline-flex; }
-/* Anchored to the top bar's bottom-right corner rather than the gear: when the bar wraps on a
-   phone the gear can land anywhere, and a popover pinned to it ran off the left of the screen. */
+/* Anchored to the top bar's bottom-left corner, under the context counter, rather than to the
+   counter itself: when the bar wraps on a phone it can land anywhere and a pinned popover ran off-screen. */
 .popover {
-  position: absolute; top: calc(100% + 6px); right: 8px; z-index: 20; width: min(320px, calc(100% - 16px));
+  position: absolute; top: calc(100% + 6px); left: 8px; z-index: 20; width: min(320px, calc(100% - 16px));
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px;
   box-shadow: 0 8px 24px rgb(0 0 0 / .18);
 }
@@ -308,6 +315,7 @@ body.resizing iframe { pointer-events: none; }
 /* Touch: finger-sized targets for the top bar icons and the options rows. */
 @media (pointer: coarse) {
   #topbar .icon-btn { min-width: 34px; min-height: 34px; justify-content: center; }
+  .ctx { min-height: 34px; }
   .topbar-actions { gap: 4px; }
   .popover label { font-size: 14px; padding: 6px 0; align-items: center; }
   .popover label input { margin: 0; width: 16px; height: 16px; }

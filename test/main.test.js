@@ -255,6 +255,16 @@ test('Compact button skips full compaction analysis while media is clearable', (
   assert.equal(a.el.clearMedia.hidden, false);
   assert.equal(a.compactionRuns, 0);
 });
+test('context counter flags compacting and its details say what Compact frees', () => {
+  const a = app(); a.state.messages = history(); a.state.context.max = 6000;
+  a.updateClearMedia();
+  assert.equal(a.el.ctx.hidden, false); // nothing counted yet, but it's the way to reach Compact
+  assert.equal(a.el.ctx.dataset.compact, 'yes');
+  assert.match(a.el.ctxHint.textContent, /^Shrinks the history sent to the model \(~[\d.]+k tokens\)/);
+  a.clearMedia();
+  assert.equal(a.el.ctx.dataset.compact, '');
+  assert.equal(a.el.ctxHint.textContent, 'Nothing worth compacting yet.');
+});
 test('Compact button does not count the unfreezable live suffix as savings', () => {
   const a = app(); a.state.messages = [{ role: 'user', content: 'x'.repeat(8000) }];
   a.updateClearMedia();

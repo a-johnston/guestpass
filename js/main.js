@@ -71,6 +71,10 @@ const el = {
   queue: $('queue'),
   status: $('status'),
   ctx: $('ctx'),
+  ctxPop: $('ctx-pop'),
+  ctxUsed: $('ctx-used'),
+  ctxSpeed: $('ctx-speed'),
+  ctxHint: $('ctx-compact-hint'),
   clearMedia: $('clear-media'),
   panesShow: $('panes-show'),
   cfgStatus: $('cfg-status'),
@@ -116,7 +120,7 @@ function init() {
   wireLayout();
   wireScrollFollow();
   wireSaveShortcut();
-  wireOptions();
+  wireContextDetails();
   connect();
   el.prompt.focus();
 }
@@ -172,22 +176,54 @@ function setStatus(kind, text) {
   el.status.setAttribute('aria-label', text);
 }
 
+/** While a reply streams: {tokens, tps} estimated from the text so far, else null. */
+let liveContext = null;
+/** {tokens, media} while the Compact button would free enough to be worth it, else null (see updateClearMedia). */
+let compactable = null;
+/** Stats of the last finished reply, for the speed line in the context details. */
+let lastStats = null;
+
 /**
  * Top-bar counter: tokens in the latest request (prompt + reply), out of the window if known.
- * While generating, `live` adds an estimate of the reply so far ("~") and the current speed;
- * the exact count replaces it when the server's usage report arrives.
+ * While generating, `live` adds an estimate of the reply so far ("~"); the exact count replaces
+ * it when the server's usage report arrives. Speed and Compact live in the details it opens.
  */
 function updateContext(live = null) {
-  if (!live) updateClearMedia();
+  liveContext = live;
+  if (live) renderContext();
+  else updateClearMedia(); // renders too
+}
+
+const contextUsed = () => (liveContext ? (state.context.used ?? 0) + liveContext.tokens : state.context.used);
+
+function renderContext() {
   const { max } = state.context;
-  const used = live ? (state.context.used ?? 0) + live.tokens : state.context.used;
-  el.ctx.hidden = used == null && max == null;
-  if (el.ctx.hidden) return;
-  const count = used == null ? '–' : `${live ? '~' : ''}${formatTokens(used)}`;
-  const speed = live?.tps ? ` · ${Math.round(live.tps)} tok/s` : '';
-  el.ctx.textContent = `${count}${max ? ` / ${formatTokens(max)}` : ''}${speed}`;
-  el.ctx.setAttribute('aria-label', `Context: ${used ?? 'unknown'} of ${max ?? 'unknown'} tokens`);
+  const used = contextUsed();
+  // Always shown, even with nothing counted yet ("–"): it's the way to Compact and the compaction options.
+  el.ctx.dataset.compact = compactable ? 'yes' : '';
+  if (!el.ctxPop.hidden) renderContextDetails();
+  const count = used == null ? '–' : `${liveContext ? '~' : ''}${formatTokens(used)}`;
+  el.ctx.textContent = `${count}${max ? ` / ${formatTokens(max)}` : ''}`;
+  el.ctx.setAttribute('aria-label', `Context: ${used ?? 'unknown'} of ${max ?? 'unknown'} tokens${compactable ? ', compacting available' : ''}`);
   el.ctx.dataset.level = max && used != null ? (used / max >= 0.9 ? 'high' : used / max >= 0.75 ? 'mid' : '') : '';
+}
+
+/** The context details popover: exact counts, speed, and Compact with what it would free. */
+function renderContextDetails() {
+  const { max } = state.context;
+  const used = contextUsed();
+  const n = (x) => `${liveContext ? '~' : ''}${x.toLocaleString()}`;
+  el.ctxUsed.textContent = used == null
+    ? (max ? `– of ${max.toLocaleString()} tokens` : 'not reported yet')
+    : max ? `${n(used)} of ${max.toLocaleString()} tokens (${Math.round((used / max) * 100)}%)`
+      : `${n(used)} tokens, window unknown`;
+  el.ctxSpeed.textContent = liveContext?.tps ? `~${Math.round(liveContext.tps)} tok/s (estimate)`
+    : lastStats?.tps ? `${lastStats.tps.toFixed(1)} tok/s (last reply${lastStats.tpsSource === 'server' ? ', server' : ''})`
+      : '–';
+  const saves = compactable?.tokens >= 1000 ? ` (~${formatTokens(compactable.tokens)} tokens)` : '';
+  el.ctxHint.textContent = !compactable ? 'Nothing worth compacting yet.'
+    : compactable.media ? `Stops re-sending images, files and page HTML${saves}, and compacts older history. The chat keeps everything.`
+      : `Shrinks the history sent to the model${saves}. The chat keeps everything.`;
 }
 
 const streamedChars = (p) => p.content.length + p.reasoning.length + p.toolCalls.reduce((n, c) => n + (c.function.arguments?.length || 0), 0);
@@ -544,15 +580,21 @@ function mediaUsed(history) {
 }
 
 /**
- * The "Compact" button by the context counter: shown while anything re-sent could be dropped.
- * Just the word, no size estimate, so the top bar fits on one row on more phones.
+ * The "Compact" button in the context details: shown while anything re-sent could be dropped.
+ * With clearable media, its size stands in for the savings (skipping a full compaction pass).
  */
 function updateClearMedia() {
-  const media = clearableSummary(state.messages, { renderTools: RENDER_TOOLS }).items > 0;
-  if (media) { el.clearMedia.hidden = false; return; }
-  const candidate = compactionCandidate();
-  const compacted = candidate.after + estimate(sendableHistory(candidate.upTo, state.toolsSupported));
-  el.clearMedia.hidden = estimate(sendableHistory(0, state.toolsSupported)) - compacted < 1000;
+  const media = clearableSummary(state.messages, { renderTools: RENDER_TOOLS });
+  if (media.items > 0) {
+    compactable = { tokens: media.tokens, media: true };
+  } else {
+    const candidate = compactionCandidate();
+    const compacted = candidate.after + estimate(sendableHistory(candidate.upTo, state.toolsSupported));
+    const saved = estimate(sendableHistory(0, state.toolsSupported)) - compacted;
+    compactable = saved >= 1000 ? { tokens: saved, media: false } : null;
+  }
+  el.clearMedia.hidden = !compactable;
+  renderContext();
 }
 
 function clearMedia() {
@@ -698,12 +740,10 @@ async function runTurn() {
           try { JSON.parse(call.function.arguments); } catch { call.cutOff = true; }
         }
       }
-      updateContext(); // exact figure replaces the live estimate (or clears it if usage wasn't sent)
-
       const ended = performance.now();
-      view.finish(result, {
-        stats: computeStats({ started, firstToken, ended, usage: result.usage, timings: result.timings }),
-      });
+      lastStats = computeStats({ started, firstToken, ended, usage: result.usage, timings: result.timings });
+      updateContext(); // exact figure replaces the live estimate (or clears it if usage wasn't sent)
+      view.finish(result, { stats: lastStats });
       const msg = withThinking({ role: 'assistant', content: result.content }, result.reasoning, view);
       if (result.toolCalls.length) msg.tool_calls = result.toolCalls;
       state.messages.push(msg);
@@ -1128,18 +1168,22 @@ function truncate(s, n) {
 
 // ---------------------------------------------------------------- save (Cmd/Ctrl+S)
 
-// ---------------------------------------------------------------- options popover (⚙)
+// ---------------------------------------------------------------- context details popover
 
-function wireOptions() {
-  const btn = $('opts-btn');
-  const pop = $('opts');
+/** The counter toggles the details; outside clicks and Esc close them. */
+function wireContextDetails() {
+  const btn = el.ctx;
+  const pop = el.ctxPop;
   const setOpen = (open) => {
+    if (open) renderContextDetails();
     pop.hidden = !open;
     btn.setAttribute('aria-expanded', String(open));
   };
   btn.addEventListener('click', (e) => { e.stopPropagation(); setOpen(pop.hidden); });
   document.addEventListener('click', (e) => { if (!pop.hidden && !pop.contains(e.target)) setOpen(false); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !pop.hidden) { setOpen(false); btn.focus(); } });
+  // Closing after Compact leaves its notice in the chat in view.
+  el.clearMedia.addEventListener('click', () => { clearMedia(); setOpen(false); });
   pop.addEventListener('change', (e) => {
     if (e.target.name === 'think-mode') state.thinkingMode = e.target.value;
   });
@@ -1167,7 +1211,6 @@ function saveSession() {
 // ---------------------------------------------------------------- layout: panes + resizer
 
 function wireLayout() {
-  el.clearMedia.addEventListener('click', clearMedia);
   el.panesShow.addEventListener('click', () => panes.show());
   $('panes-hide').addEventListener('click', () => panes.hide());
 
