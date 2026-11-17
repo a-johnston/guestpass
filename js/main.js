@@ -1,5 +1,5 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
-import { listModels, streamChat, fetchProps, fetchStatus, capabilitiesFrom, chainRecovery } from './api.js';
+import { listModels, streamChat, fetchProps, fetchStatus, capabilitiesFrom, chainRecovery, connectionLabel } from './api.js';
 import { toolDefs, TOOL_SYSTEM_HINT, RENDER_TOOLS, runTool, sanitizeId } from './tools.js';
 import { createFrame, removeFrame, getFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
@@ -145,7 +145,7 @@ async function connect() {
     // lists none, the field is omitted and the server picks.
     state.cfg.model = models[0]?.id || '';
     state.conn = 'ok';
-    setStatus('ok', `Connected${state.cfg.model ? ` · ${state.cfg.model}` : ''}`);
+    showConnection();
     updatePlaceholder();
     // Capabilities before the first send: they decide how attachments and tools are offered.
     const [props, status] = await Promise.all([fetchProps({ baseUrl, apiKey }), fetchStatus({ baseUrl, apiKey })]);
@@ -174,6 +174,12 @@ async function connect() {
 function setStatus(kind, text) {
   el.status.dataset.state = kind;
   el.status.setAttribute('aria-label', text);
+  el.status.title = text;
+}
+
+/** The connected dot's text, refreshed as replies reveal whether the server keeps responses. */
+function showConnection() {
+  if (state.conn === 'ok') setStatus('ok', connectionLabel({ model: state.cfg.model, ...state.api }));
 }
 
 /** While a reply streams: {tokens, tps} estimated from the text so far, else null. */
@@ -705,6 +711,7 @@ async function runTurn() {
         if (recovery) {
           if (recovery === 'use_chat') state.api.dialect = 'chat';
           if (recovery === 'stop_chaining') state.api.chain = false;
+          showConnection();
           state.chainHead = null;
           view.remove();
           rounds--;
@@ -749,6 +756,7 @@ async function runTurn() {
       state.messages.push(msg);
       if (dialect === 'responses') {
         if (state.api.chain !== false) state.api.chain = result.stored;
+        showConnection();
         const reply = { role: 'assistant', content: result.content, reasoning_content: result.reasoning, tool_calls: result.toolCalls };
         // A results-only delta cannot repair reused ids in the server's stored history.
         // Fall back to the full send, where both sides can be assigned unique wire ids.

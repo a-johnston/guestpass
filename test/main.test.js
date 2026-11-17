@@ -10,7 +10,7 @@ import { assertWireHistory } from './helpers/history.js';
 import { runRecall } from '../js/recall.js';
 import { buildResponsesBody } from '../js/responses.js';
 import { fallbackFor } from '../js/fallbacks.js';
-import { chainRecovery } from '../js/api.js';
+import { chainRecovery, connectionLabel } from '../js/api.js';
 globalThis.window ??= { addEventListener() {} };
 const tools = await import('../js/tools.js');
 const source = readFileSync(new URL('../js/main.js', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '').replace(/\ninit\(\);\s*$/, '');
@@ -20,7 +20,7 @@ function app(responses = [], onTool = null) {
   const requests = [], notices = [], executed = [];
   let compactionRuns = 0;
   const context = vm.createContext({
-    ...content, ...compaction, ...items, ...tools, runRecall, buildResponsesBody, fallbackFor, chainRecovery,
+    ...content, ...compaction, ...items, ...tools, runRecall, buildResponsesBody, fallbackFor, chainRecovery, connectionLabel,
     compactHistory: (...args) => { compactionRuns++; return compaction.compactHistory(...args); },
     document: { getElementById: node }, createPaneManager: () => ({}), structuredClone, AbortController, performance,
     streamChat: async (req) => { requests.push(structuredClone(req.body)); const next = responses.shift(); if (next instanceof Error) throw next; return typeof next === 'function' ? await next() : next || reply(); },
@@ -108,6 +108,21 @@ test('a reused id in a later stored reply starts a fresh uniquely paired chain',
   const results = a.requests[2].input.filter((i) => i.type === 'function_call_output').map((i) => i.call_id);
   assert.equal(new Set(calls).size, 2);
   assert.deepEqual(results, calls);
+});
+test('the connection dot tooltip follows what the server turns out to support', async () => {
+  const refused = Object.assign(new Error('HTTP 400: previous_response_id is not supported'), { status: 400, apiError: true });
+  const missing = Object.assign(new Error('HTTP 404: Not Found'), { status: 404 });
+  const a = app([reply({ stored: true, responseId: 'r1' }), refused, reply(), missing, reply()]);
+  a.state.conn = 'ok'; a.state.cfg.model = 'qfn';
+  a.state.messages = [{ role: 'user', content: 'go' }];
+  await a.runTurn();
+  assert.equal(a.el.status.title, 'Connected to qfn using the stateful Responses API');
+  a.pushUser('again');
+  await a.runTurn();
+  assert.equal(a.el.status.title, 'Connected to qfn using the stateless Responses API');
+  a.pushUser('once more');
+  await a.runTurn();
+  assert.equal(a.el.status.title, 'Connected to qfn using the stateless Chat Completions API');
 });
 test('a reply with duplicate batch ids forces a full paired resend instead of chaining', async () => {
   const calls = ['kv', 'read'].map((name) => ({ id: 'call_0', type: 'function', function: { name, arguments: '{}' } }));

@@ -138,6 +138,19 @@ export function chainRecovery(err, { dialect, chained }) {
 }
 
 /**
+ * The connection indicator's text: the model and the API carrying the conversation. Stateful
+ * means the server keeps responses, so only new messages are sent; `chain` is null until the
+ * first reply says.
+ */
+export function connectionLabel({ model, dialect, chain }) {
+  const api = dialect === 'chat' ? 'stateless Chat Completions API'
+    : chain === true ? 'stateful Responses API'
+    : chain === false ? 'stateless Responses API'
+    : 'Responses API';
+  return `Connected${model ? ` to ${model}` : ''} using the ${api}`;
+}
+
+/**
  * Streams one reply. dialect 'chat' posts to /chat/completions; 'responses' posts `body` as is
  * to /responses. onUpdate receives the partial accumulated reply ({content, reasoning,
  * toolCalls, …}) as it arrives. Resolves to the final reply; for 'responses' it also carries

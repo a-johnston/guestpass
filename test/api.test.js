@@ -1,6 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { capabilitiesFrom, streamChat, isMissingRoute, chainError, chainRecovery } from '../js/api.js';
+import { capabilitiesFrom, streamChat, isMissingRoute, chainError, chainRecovery, connectionLabel } from '../js/api.js';
+
+test('connectionLabel: the model and which API carries the conversation', () => {
+  assert.equal(connectionLabel({ model: 'qfn', dialect: 'responses', chain: true }), 'Connected to qfn using the stateful Responses API');
+  assert.equal(connectionLabel({ model: 'qfn', dialect: 'responses', chain: false }), 'Connected to qfn using the stateless Responses API');
+  assert.equal(connectionLabel({ model: 'qfn', dialect: 'chat', chain: null }), 'Connected to qfn using the stateless Chat Completions API');
+  assert.equal(connectionLabel({ model: 'qfn', dialect: 'chat', chain: false }), 'Connected to qfn using the stateless Chat Completions API');
+  // Whether the server keeps responses is only known once one comes back.
+  assert.equal(connectionLabel({ model: 'qfn', dialect: 'responses', chain: null }), 'Connected to qfn using the Responses API');
+  assert.equal(connectionLabel({ model: '', dialect: 'responses', chain: true }), 'Connected using the stateful Responses API');
+});
 
 test('vision from the model entry wins over /props', () => {
   const caps = capabilitiesFrom({ inputModalities: ['text'] }, { modalities: { vision: true } });
