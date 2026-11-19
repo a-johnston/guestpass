@@ -79,15 +79,14 @@
             <dt>Speed</dt><dd id="ctx-speed"></dd>
           </dl>
           <div class="ctx-section ctx-compact">
-            <button type="button" id="clear-media" class="clear-media" hidden>Compact</button>
-            <p id="ctx-compact-hint" class="muted small"></p>
+            <button type="button" id="clear-media" class="clear-media" aria-describedby="ctx-compact-hint" disabled>Compact Now</button>
+            <span id="ctx-compact-hint" class="muted small">(saves 0 tokens)</span>
           </div>
           <div class="ctx-section">
             <fieldset>
               <legend>Thinking kept when compacting</legend>
               <label><input type="radio" name="think-mode" value="all" checked /> All turns</label>
               <label><input type="radio" name="think-mode" value="turn" /> Current turn only</label>
-              <p class="muted small">Applied when history is compacted; new steps are sent whole until then.</p>
             </fieldset>
           </div>
         </div>

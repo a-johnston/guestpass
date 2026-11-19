@@ -265,9 +265,10 @@ test('manual compaction during streaming cannot resurrect the old chain', async 
 });
 test('Compact button skips full compaction analysis while media is clearable', () => {
   const a = app();
-  a.state.messages = [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,' + 'A'.repeat(1000000) }, meta: { kind: 'attachment', bytes: 750000 } }] }];
+  a.state.messages = [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,' + 'A'.repeat(1000000) }, meta: { kind: 'attachment', bytes: 750000, width: 320, height: 320 } }] }];
   a.updateClearMedia();
-  assert.equal(a.el.clearMedia.hidden, false);
+  assert.equal(a.el.clearMedia.disabled, false);
+  assert.equal(a.el.ctxHint.textContent, '(saves 100 tokens)');
   assert.equal(a.compactionRuns, 0);
 });
 test('context counter flags compacting and its details say what Compact frees', () => {
@@ -275,20 +276,22 @@ test('context counter flags compacting and its details say what Compact frees', 
   a.updateClearMedia();
   assert.equal(a.el.ctx.hidden, false); // nothing counted yet, but it's the way to reach Compact
   assert.equal(a.el.ctx.dataset.compact, 'yes');
-  assert.match(a.el.ctxHint.textContent, /^Shrinks the history sent to the model \(~[\d.]+k tokens\)/);
+  assert.match(a.el.ctxHint.textContent, /^\(saves [\d.]+k tokens\)$/);
   a.clearMedia();
   assert.equal(a.el.ctx.dataset.compact, '');
-  assert.equal(a.el.ctxHint.textContent, 'Nothing worth compacting yet.');
+  assert.equal(a.el.clearMedia.hidden, false);
+  assert.equal(a.el.clearMedia.disabled, true);
+  assert.equal(a.el.ctxHint.textContent, '(saves 0 tokens)');
 });
 test('Compact button does not count the unfreezable live suffix as savings', () => {
   const a = app(); a.state.messages = [{ role: 'user', content: 'x'.repeat(8000) }];
   a.updateClearMedia();
-  assert.equal(a.el.clearMedia.hidden, true);
+  assert.equal(a.el.clearMedia.disabled, true);
 });
 test('manual button compacts text-only histories and recall sees full originals', async () => {
   const a = app([reply({ toolCalls: [{ id: 'rec', type: 'function', function: { name: 'recall', arguments: '{"id":"r1"}' } }] }), reply()]);
   a.state.messages = history(); a.state.context.max = 6000;
-  a.updateClearMedia(); assert.equal(a.el.clearMedia.hidden, false);
+  a.updateClearMedia(); assert.equal(a.el.clearMedia.disabled, false);
   a.clearMedia(); assert.ok(a.state.compaction);
   assert.match(a.notices[0], /^Compacted the history sent/);
   await a.runTurn();

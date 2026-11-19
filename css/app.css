@@ -93,9 +93,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .ctx-stats dt { color: var(--muted); }
 .ctx-stats dd { margin: 0; font-variant-numeric: tabular-nums; }
 .ctx-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
-.ctx-compact { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.ctx-compact { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .clear-media { font-size: 13px; padding: 4px 12px; border-color: var(--border); }
-.clear-media:hover { background: var(--border); }
+.clear-media:enabled:hover { background: var(--border); }
 .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .status[data-state="ok"] .dot { background: var(--ok); }
 .status[data-state="warn"] .dot { background: var(--warn); }

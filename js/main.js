@@ -184,8 +184,8 @@ function showConnection() {
 
 /** While a reply streams: {tokens, tps} estimated from the text so far, else null. */
 let liveContext = null;
-/** {tokens, media} while the Compact button would free enough to be worth it, else null (see updateClearMedia). */
-let compactable = null;
+/** Estimated tokens saved by manual compaction, or null when compaction is unavailable. */
+let compactSavings = null;
 /** Stats of the last finished reply, for the speed line in the context details. */
 let lastStats = null;
 
@@ -206,11 +206,11 @@ function renderContext() {
   const { max } = state.context;
   const used = contextUsed();
   // Always shown, even with nothing counted yet ("–"): it's the way to Compact and the compaction options.
-  el.ctx.dataset.compact = compactable ? 'yes' : '';
+  el.ctx.dataset.compact = compactSavings !== null ? 'yes' : '';
   if (!el.ctxPop.hidden) renderContextDetails();
   const count = used == null ? '–' : `${liveContext ? '~' : ''}${formatTokens(used)}`;
   el.ctx.textContent = `${count}${max ? ` / ${formatTokens(max)}` : ''}`;
-  el.ctx.setAttribute('aria-label', `Context: ${used ?? 'unknown'} of ${max ?? 'unknown'} tokens${compactable ? ', compacting available' : ''}`);
+  el.ctx.setAttribute('aria-label', `Context: ${used ?? 'unknown'} of ${max ?? 'unknown'} tokens${compactSavings !== null ? ', compacting available' : ''}`);
   el.ctx.dataset.level = max && used != null ? (used / max >= 0.9 ? 'high' : used / max >= 0.75 ? 'mid' : '') : '';
 }
 
@@ -226,10 +226,8 @@ function renderContextDetails() {
   el.ctxSpeed.textContent = liveContext?.tps ? `~${Math.round(liveContext.tps)} tok/s (estimate)`
     : lastStats?.tps ? `${lastStats.tps.toFixed(1)} tok/s (last reply${lastStats.tpsSource === 'server' ? ', server' : ''})`
       : '–';
-  const saves = compactable?.tokens >= 1000 ? ` (~${formatTokens(compactable.tokens)} tokens)` : '';
-  el.ctxHint.textContent = !compactable ? 'Nothing worth compacting yet.'
-    : compactable.media ? `Stops re-sending images, files and page HTML${saves}, and compacts older history. The chat keeps everything.`
-      : `Shrinks the history sent to the model${saves}. The chat keeps everything.`;
+  const saves = compactSavings ?? 0;
+  el.ctxHint.textContent = `(saves ${formatTokens(saves)} ${saves === 1 ? 'token' : 'tokens'})`;
 }
 
 const streamedChars = (p) => p.content.length + p.reasoning.length + p.toolCalls.reduce((n, c) => n + (c.function.arguments?.length || 0), 0);
@@ -586,20 +584,20 @@ function mediaUsed(history) {
 }
 
 /**
- * The "Compact" button in the context details: shown while anything re-sent could be dropped.
+ * Enable manual compaction for clearable media or worthwhile text savings.
  * With clearable media, its size stands in for the savings (skipping a full compaction pass).
  */
 function updateClearMedia() {
   const media = clearableSummary(state.messages, { renderTools: RENDER_TOOLS });
   if (media.items > 0) {
-    compactable = { tokens: media.tokens, media: true };
+    compactSavings = media.tokens;
   } else {
     const candidate = compactionCandidate();
     const compacted = candidate.after + estimate(sendableHistory(candidate.upTo, state.toolsSupported));
     const saved = estimate(sendableHistory(0, state.toolsSupported)) - compacted;
-    compactable = saved >= 1000 ? { tokens: saved, media: false } : null;
+    compactSavings = saved >= 1000 ? saved : null;
   }
-  el.clearMedia.hidden = !compactable;
+  el.clearMedia.disabled = compactSavings === null;
   renderContext();
 }
 
