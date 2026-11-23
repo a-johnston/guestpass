@@ -182,7 +182,7 @@ export async function runTool(name, rawArgs, ui) {
       const fresh = f.logs.slice(seen);
       f.readCursor = f.logs.length;
       const note = seen ? `(${seen} earlier line${seen === 1 ? '' : 's'} already read)\n` : '';
-      return truncate(`${note}${fresh.length ? formatLogs(fresh) : `(no new console output${waitMs ? ` after ${waitMs} ms` : ''})`}`);
+      return truncate(`${note}${fresh.length ? formatLogs(fresh) : `(no new console output${waitMs ? ` after ${waitMs} ms` : ''}; ${pageState(f)})`}`);
     }
     case 'edit': {
       if (typeof args.new === 'string' && args.new.includes(OMITTED_MARKER)) {
@@ -258,6 +258,16 @@ export async function runTool(name, rawArgs, ui) {
     default:
       return `Error: unknown tool "${name}".`;
   }
+}
+
+/**
+ * Says whether a quiet page has run, so silence isn't ambiguous. Loaded is the load event: its
+ * scripts have run by then. Errors count every one still kept, read or not.
+ */
+function pageState(f) {
+  if (!f.ready) return 'the page is still loading';
+  const errors = f.logs.filter((l) => l.level === 'error').length;
+  return errors ? `the page has loaded; it has logged ${errors} error${errors === 1 ? '' : 's'}` : 'the page has loaded, with no errors';
 }
 
 /**

@@ -50,3 +50,22 @@ test('inline without a usable id is refused instead of getting a made-up one', a
   }
   assert.equal(mounted.length, 0);
 });
+
+test('read_console says whether a silent page has loaded, and whether it has logged errors', async () => {
+  const { createFrame, getFrame, removeFrame } = await import('../js/frames.js');
+  const had = globalThis.document;
+  globalThis.document = { createElement: () => ({ setAttribute() {}, remove() {} }) };
+  try {
+    createFrame('quiet', '<p>hi</p>');
+    const f = getFrame('quiet');
+    assert.equal(await runTool('read_console', { id: 'quiet' }, {}), '(no new console output; the page is still loading)');
+    f.ready = true;
+    assert.equal(await runTool('read_console', { id: 'quiet', wait: 100 }, {}), '(no new console output after 100 ms; the page has loaded, with no errors)');
+    f.logs.push({ level: 'error', text: 'Uncaught boom' }, { level: 'log', text: 'hi' });
+    assert.match(await runTool('read_console', { id: 'quiet' }, {}), /\[error\] Uncaught boom\n\[log\] hi$/);
+    assert.equal(await runTool('read_console', { id: 'quiet' }, {}), '(2 earlier lines already read)\n(no new console output; the page has loaded; it has logged 1 error)');
+  } finally {
+    removeFrame('quiet');
+    globalThis.document = had;
+  }
+});
