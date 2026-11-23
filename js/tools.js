@@ -1,6 +1,6 @@
 // Tools the model can call. They run entirely in this page: HTML is rendered into sandboxed
 // iframes, either inline in the chat or in a side pane. Widgets and panes ("pages") share one
-// id namespace; rendering an id that already exists replaces it.
+// id namespace; rendering an id that already exists replaces it if it's the same kind.
 //
 // The definitions and TOOL_SYSTEM_HINT are sent with every request, so they are deliberately terse (~840 tokens on a Qwen template, of which ~540 is the template's
 // fixed tool wrapper). Facts shared by all pages live once in the hint; descriptions state only
@@ -73,7 +73,8 @@ export const TOOL_SYSTEM_HINT = 'Your tools can render web pages here: use them 
   "fetch() only reaches CORS-enabled servers: if blocked, don't retry. " +
   'In pages: kv is a store shared live by all pages and the kv tool (get(k), set(k, v), delete(k), all(); subscribe((k, v) => …) fires on every change). ' +
   'Defining window.onPatch = (data) => result lets the patch tool update a page in place. ' +
-  'Inline and pane pages share one id namespace: reusing an id replaces the existing one. ' +
+  'Inline and pane pages share one id namespace: reusing an id replaces a page of the same kind. ' +
+  "Inline widgets take their content's height: size them in px, not vh or height:100% (those grow without end). Panes fill their panel. " +
   'Each page is a single-file app: build large ones incrementally, starting small and then using edit. ' +
   'inline, pane, edit, and patch return console output. ' +
   'Older steps may be compacted into stubs with recall ids: recall brings any of them back, or searches the history. Start a line with "Key:" to keep a lasting finding (one line each, only what you will need later).';
