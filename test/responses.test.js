@@ -89,3 +89,8 @@ test('body', () => {
   });
   assert.deepEqual(Object.keys(buildResponsesBody({ instructions: '', tools: [], messages: [] })), ['input', 'stream']);
 });
+
+test('body carries the reasoning effort when one is chosen', () => {
+  assert.deepEqual(buildResponsesBody({ messages: [], model: 'm', effort: 'low' }).reasoning, { effort: 'low' });
+  assert.equal('reasoning' in buildResponsesBody({ messages: [], model: 'm', effort: null }), false);
+});

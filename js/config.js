@@ -2,8 +2,8 @@
 //
 // A share link is the app URL plus `#<fragment>`. The fragment never reaches the web host, so the
 // connection details only travel between the browser and the model server. It's an encoding, not
-// encryption: anyone with the link has the key. The model isn't included; chats use the server's
-// first listed model.
+// encryption: anyone with the link has the key. The model isn't included; chats start on the
+// server's first listed model, and the connection details switch it.
 //
 // Payload text (before compression): `<url> [<apiKey> [<system prompt…>]]`, space-separated,
 // trailing empty fields dropped. The URL is written compactly (see compactUrl): `https://` and a

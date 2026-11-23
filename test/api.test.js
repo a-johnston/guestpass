@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { capabilitiesFrom, streamChat, isMissingRoute, chainError, chainRecovery, connectionLabel } from '../js/api.js';
+import { capabilitiesFrom, streamChat, isMissingRoute, chainError, chainRecovery, connectionLabel, effortsOf, effortLabel } from '../js/api.js';
 
 test('connectionLabel: the model and which API carries the conversation', () => {
   assert.equal(connectionLabel({ model: 'qfn', dialect: 'responses', chain: true }), 'Connected to qfn using the stateful Responses API');
@@ -128,4 +128,30 @@ test('chainRecovery: what a failed request means for the dialect and the chain',
   assert.equal(chainRecovery(notFound, { dialect: 'responses', chained: false }), null, 'a full request that fails is an ordinary error');
   assert.equal(chainRecovery(unsupported, { dialect: 'responses', chained: true }), 'stop_chaining');
   assert.equal(chainRecovery(err({ status: 400, message: 'HTTP 400: bad image' }), { dialect: 'responses', chained: true }), null);
+});
+
+test('effortsOf: llm-launcher reasoning levels, weakest first, starting on the default', () => {
+  const launcher = (levels, def) => ({ reasoning: { supported_efforts: levels, default_effort: def, default_enabled: def != null, mandatory: !levels.includes('none') } });
+  assert.deepEqual(effortsOf(launcher(['xhigh', 'medium', 'low', 'none'], 'medium')), { levels: ['none', 'low', 'medium', 'xhigh'], initial: 'medium' });
+  // A null default_effort means thinking is off by default.
+  assert.deepEqual(effortsOf(launcher(['high', 'none'], null)), { levels: ['none', 'high'], initial: 'none' });
+  // Unknown names keep the server's order, after the known ones.
+  assert.deepEqual(effortsOf(launcher(['turbo', 'high', 'warp', 'low'], 'low')).levels, ['low', 'high', 'turbo', 'warp']);
+});
+
+test('effortsOf: no menu without at least two levels', () => {
+  assert.equal(effortsOf({}), null);
+  assert.equal(effortsOf({ reasoning: {} }), null);
+  assert.equal(effortsOf({ reasoning: { supported_efforts: ['high'], default_effort: 'high' } }), null);
+  assert.equal(effortsOf({ reasoning: { supported_efforts: ['high', 'high', ''] } }), null);
+});
+
+test('effortsOf: an unlisted or missing default falls back to medium, else the weakest that thinks', () => {
+  assert.equal(effortsOf({ reasoning: { supported_efforts: ['high', 'medium', 'none'] } }).initial, 'medium');
+  assert.equal(effortsOf({ reasoning: { supported_efforts: ['high', 'low', 'none'], default_effort: 'xhigh' } }).initial, 'low');
+  assert.equal(effortsOf({ reasoning: { supported_efforts: ['high', 'low', 'none'], default_enabled: false } }).initial, 'none');
+});
+
+test('effortLabel: "none" reads as Off; unknown names pass through', () => {
+  assert.deepEqual(['none', 'xhigh', 'turbo'].map(effortLabel), ['Off', 'Extra high', 'turbo']);
 });

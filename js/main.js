@@ -1,5 +1,5 @@
 import { readShareFromHash, normalizeBaseUrl, buildShareLink } from './config.js';
-import { listModels, streamChat, fetchProps, fetchStatus, capabilitiesFrom, chainRecovery, connectionLabel } from './api.js';
+import { listModels, streamChat, fetchProps, fetchStatus, capabilitiesFrom, chainRecovery, connectionLabel, effortLabel } from './api.js';
 import { toolDefs, TOOL_SYSTEM_HINT, RENDER_TOOLS, runTool, sanitizeId } from './tools.js';
 import { createFrame, removeFrame, getFrame } from './frames.js';
 import { createPaneManager } from './panes.js';
@@ -38,8 +38,14 @@ const state = {
   thinkingMode: 'all', // at compaction: 'turn' keeps only the current turn; 'all' keeps every turn
   requestUsage: true, // stream_options.include_usage, for the context counter
   toolImages: true, // images inside tool results; off: sent in a user message after them
-  // From /models and /props at connect. vision: null = not reported (tried until rejected).
+  // From the selected /models entry and /props. vision: null = not reported (tried until rejected).
   caps: { vision: null, documents: false, basalt: false },
+  /** The server's model list (see listModels); state.cfg.model is the selected id. */
+  models: [],
+  server: { props: null, status: null }, // /props and /v1/status, fetched at connect
+  effort: null, // reasoning effort sent with each request; null when the model offers no choice
+  effortPick: null, // the effort the user chose: kept across models that offer it
+  modelsUsed: new Set(), // for the saved session's header
   context: { used: null, max: null, reported: false, floor: 0 },
   compaction: null, // {messages, upTo}: independent send-shape snapshot; local history stays whole
   // Which API the server speaks, detected per connection: 'responses' until /responses turns out
@@ -70,6 +76,14 @@ const el = {
   stop: $('stop-btn'),
   queue: $('queue'),
   status: $('status'),
+  connPop: $('conn-pop'),
+  connText: $('conn-text'),
+  connRetry: $('conn-retry'),
+  connOptions: $('conn-options'),
+  modelSelect: $('model-select'),
+  effortField: $('effort-field'),
+  effortSelect: $('effort-select'),
+  modelNote: $('model-note'),
   ctx: $('ctx'),
   ctxPop: $('ctx-pop'),
   ctxUsed: $('ctx-used'),
@@ -120,12 +134,14 @@ function init() {
   wireLayout();
   wireScrollFollow();
   wireSaveShortcut();
+  wireConnectionDetails();
   wireContextDetails();
   connect();
   el.prompt.focus();
 }
 
 const CONNECT_TIMEOUT_MS = 10000;
+let connectNotice = null; // the failure notice with a Retry button, removed by the next attempt
 
 /**
  * Fetches the model list. Messages typed meanwhile are queued (state.conn === 'pending') and sent
@@ -133,27 +149,30 @@ const CONNECT_TIMEOUT_MS = 10000;
  * notice offers a retry, and a queued message's "Send now" tries without a model anyway.
  */
 async function connect() {
+  connectNotice?.remove();
+  connectNotice = null;
   state.conn = 'pending';
   state.api = { dialect: 'responses', chain: null };
   state.chainHead = null;
   setStatus('pending', 'Connecting…');
+  renderModelPicker();
   updatePlaceholder();
   const { baseUrl, apiKey } = state.cfg;
   try {
     const models = await listModels({ baseUrl, apiKey, signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS) });
-    // Links don't carry a model (it made them long); use the server's first one. If the server
-    // lists none, the field is omitted and the server picks.
+    // Links don't carry a model (it made them long): start on the server's first one, switchable
+    // from the connection details. If the server lists none, the field is omitted and it picks.
+    state.models = models;
     state.cfg.model = models[0]?.id || '';
+    state.effort = models[0]?.effort?.initial ?? null;
     state.conn = 'ok';
     showConnection();
+    renderModelPicker();
     updatePlaceholder();
     // Capabilities before the first send: they decide how attachments and tools are offered.
     const [props, status] = await Promise.all([fetchProps({ baseUrl, apiKey }), fetchStatus({ baseUrl, apiKey })]);
-    const caps = capabilitiesFrom(models[0] ?? {}, props, status);
-    state.caps = { vision: caps.vision, documents: caps.documents, basalt: caps.basalt };
-    state.context.max = caps.contextLength;
-    state.context.reported = caps.contextLength != null;
-    state.context.floor = 0;
+    state.server = { props, status };
+    applyModelCaps();
     updateContext();
     if (state.queue.length && !state.busy) runTurn();
   } catch (e) {
@@ -163,25 +182,83 @@ async function connect() {
     const reason = `Couldn't connect. ${why}${/[.!?]$/.test(why) ? '' : '.'}`;
     setStatus('warn', reason);
     const waiting = state.queue.length ? ' Your queued message is waiting: retry, or use its "Send now" to try without a model.' : '';
-    const n = notice(`${reason}${waiting}`, 'warn');
+    const n = connectNotice = notice(`${reason}${waiting}`, 'warn');
     const retry = h('button', 'ghost small', 'Retry');
     retry.type = 'button';
-    retry.addEventListener('click', () => { n.remove(); connect(); });
+    retry.addEventListener('click', connect);
     n.append(' ', retry);
   }
 }
 
-function setStatus(kind, text) {
+const currentModel = () => state.models.find((m) => m.id === state.cfg.model) ?? null;
+const modelName = (m) => m?.name || m?.id || '';
+
+/** Capabilities and context window of the selected model (the server-wide parts from connect). */
+function applyModelCaps() {
+  const caps = capabilitiesFrom(currentModel() ?? {}, state.server.props, state.server.status);
+  state.caps = { vision: caps.vision, documents: caps.documents, basalt: caps.basalt };
+  state.context.max = caps.contextLength;
+  state.context.reported = caps.contextLength != null;
+  state.context.floor = 0;
+}
+
+/**
+ * Switches the model for the next request. Its capabilities and window replace the old model's.
+ * chat-bridge refuses a model change within a stored response chain, so the next request starts
+ * a new chain with the whole history.
+ */
+function selectModel(id) {
+  const m = state.models.find((x) => x.id === id);
+  if (!m || id === state.cfg.model || state.busy) return;
+  state.cfg.model = id;
+  state.chainHead = null;
+  state.effort = !m.effort ? null : m.effort.levels.includes(state.effortPick) ? state.effortPick : m.effort.initial;
+  applyModelCaps();
+  updateContext();
+  showConnection();
+  renderModelPicker();
+}
+
+/**
+ * The connection details' model and thinking menus. One model: shown, but disabled. Fewer than
+ * two efforts: no thinking menu. The model can't change while a reply runs: tool rounds would
+ * otherwise switch backends mid-turn.
+ */
+function renderModelPicker() {
+  const option = (value, text, title) => Object.assign(h('option', null, text), { value, title: title || '' });
+  el.connOptions.hidden = state.conn !== 'ok';
+  if (state.conn !== 'ok') return;
+  const { models } = state;
+  const sel = el.modelSelect;
+  sel.replaceChildren(...(models.length
+    ? models.map((m) => option(m.id, modelName(m), m.name ? m.id : ''))
+    : [option('', 'Server default')]));
+  sel.value = state.cfg.model;
+  sel.disabled = models.length < 2 || state.busy;
+  sel.title = models.length > 1 && state.busy ? 'Switch models once the reply finishes' : '';
+  const choice = currentModel()?.effort;
+  el.effortField.hidden = !choice;
+  if (choice) {
+    el.effortSelect.replaceChildren(...choice.levels.map((e) => option(e, effortLabel(e))));
+    el.effortSelect.value = state.effort;
+  }
+  el.modelNote.hidden = models.length < 2;
+}
+
+/** The dot's state and label; detail is the popover's text (defaults to the label). */
+function setStatus(kind, text, detail = text) {
   el.status.dataset.state = kind;
   el.status.setAttribute('aria-label', text);
   el.status.title = text;
+  el.connText.textContent = detail;
+  el.connRetry.hidden = kind !== 'warn';
 }
 
 /** The connected dot's text, refreshed as replies reveal whether the server keeps responses. */
 function showConnection() {
-  if (state.conn === 'ok') setStatus('ok', connectionLabel({ model: state.cfg.model, ...state.api }));
+  // The popover shows the model in its menu, so its text leaves the model out.
+  if (state.conn === 'ok') setStatus('ok', connectionLabel({ model: modelName(currentModel()) || state.cfg.model, ...state.api }), connectionLabel({ ...state.api }));
 }
-
 /** While a reply streams: {tokens, tps} estimated from the text so far, else null. */
 let liveContext = null;
 /** Estimated tokens saved by manual compaction, or null when compaction is unavailable. */
@@ -281,8 +358,7 @@ async function refreshModels() {
   try {
     const models = await listModels(cfg);
     if (req !== modelsRequest) return;
-    const using = models.length ? ` Chats will use ${models[0].id}${models.length > 1 ? ' (the first listed)' : ''}.` : '';
-    showSetupStatus('ok', `Connected — ${models.length} model${models.length === 1 ? '' : 's'} available.${using}`);
+    showSetupStatus('ok', `Connected — ${models.length} model${models.length === 1 ? '' : 's'} available.`);
   } catch (e) {
     if (req !== modelsRequest) return;
     showSetupStatus('error', e.message);
@@ -443,6 +519,7 @@ function setBusy(busy) {
   state.busy = busy;
   el.stop.hidden = !busy;
   updatePlaceholder();
+  renderModelPicker();
   if (!busy) el.prompt.focus();
 }
 
@@ -555,12 +632,15 @@ function buildRequest() {
   const responses = state.api.dialect === 'responses';
   const head = responses && state.api.chain !== false && state.chainHead?.sent < state.messages.length ? state.chainHead : null;
   const history = sendableHistory(head ? head.sent : 0, toolsOn);
+  // Sent every time: a request that names no effort gets the server's default, not the one shown.
+  const { model } = state.cfg, { effort } = state;
   let body;
   if (responses) {
-    body = buildResponsesBody({ instructions: system, messages: history, tools, model: state.cfg.model, previousResponseId: head?.id });
+    body = buildResponsesBody({ instructions: system, messages: history, tools, model, effort, previousResponseId: head?.id });
   } else {
     body = { messages: system ? [{ role: 'system', content: system }, ...history] : history };
-    if (state.cfg.model) body.model = state.cfg.model;
+    if (model) body.model = model;
+    if (effort) body.reasoning_effort = effort;
     if (tools) body.tools = tools;
     if (state.requestUsage) body.stream_options = { include_usage: true };
   }
@@ -730,6 +810,7 @@ async function runTurn() {
         return;
       }
       state.stream = null;
+      if (body.model) state.modelsUsed.add(body.model);
       if (result.usage) {
         const u = result.usage;
         state.context.used = u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0);
@@ -1174,23 +1255,43 @@ function truncate(s, n) {
 
 // ---------------------------------------------------------------- save (Cmd/Ctrl+S)
 
-// ---------------------------------------------------------------- context details popover
+// ---------------------------------------------------------------- top-bar popovers
 
-/** The counter toggles the details; outside clicks and Esc close them. */
-function wireContextDetails() {
-  const btn = el.ctx;
-  const pop = el.ctxPop;
+const popovers = [];
+
+/** btn toggles pop, one popover open at a time; outside clicks and Esc close it. Returns setOpen. */
+function wirePopover(btn, pop, onOpen) {
   const setOpen = (open) => {
-    if (open) renderContextDetails();
+    if (open) {
+      popovers.forEach((other) => other !== setOpen && other(false));
+      onOpen?.();
+    }
     pop.hidden = !open;
     btn.setAttribute('aria-expanded', String(open));
   };
+  popovers.push(setOpen);
   btn.addEventListener('click', (e) => { e.stopPropagation(); setOpen(pop.hidden); });
   document.addEventListener('click', (e) => { if (!pop.hidden && !pop.contains(e.target)) setOpen(false); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !pop.hidden) { setOpen(false); btn.focus(); } });
+  return setOpen;
+}
+
+/** The connection dot opens what it's connected to, with the model and thinking menus. */
+function wireConnectionDetails() {
+  wirePopover(el.status, el.connPop, renderModelPicker);
+  el.connRetry.addEventListener('click', connect);
+  el.modelSelect.addEventListener('change', () => selectModel(el.modelSelect.value));
+  el.effortSelect.addEventListener('change', () => {
+    state.effort = state.effortPick = el.effortSelect.value;
+  });
+}
+
+/** The counter toggles the context details. */
+function wireContextDetails() {
+  const setOpen = wirePopover(el.ctx, el.ctxPop, renderContextDetails);
   // Closing after Compact leaves its notice in the chat in view.
   el.clearMedia.addEventListener('click', () => { clearMedia(); setOpen(false); });
-  pop.addEventListener('change', (e) => {
+  el.ctxPop.addEventListener('change', (e) => {
     if (e.target.name === 'think-mode') state.thinkingMode = e.target.value;
   });
 }
@@ -1205,7 +1306,7 @@ function wireSaveShortcut() {
 }
 
 function saveSession() {
-  const md = sessionToMarkdown(state.messages, { model: state.cfg.model, system: state.cfg.system });
+  const md = sessionToMarkdown(state.messages, { model: [...state.modelsUsed].join(', ') || state.cfg.model, system: state.cfg.system });
   const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
   const a = Object.assign(document.createElement('a'), { href: url, download: 'session.md' });
   document.body.append(a);

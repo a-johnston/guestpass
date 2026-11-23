@@ -47,9 +47,10 @@ export function toResponsesTools(tools) {
 }
 
 /** A streaming Responses request. Empty or absent fields are omitted. */
-export function buildResponsesBody({ instructions, messages, tools, model, previousResponseId }) {
+export function buildResponsesBody({ instructions, messages, tools, model, effort, previousResponseId }) {
   const body = {};
   if (model) body.model = model;
+  if (effort) body.reasoning = { effort };
   if (instructions) body.instructions = instructions;
   body.input = toResponsesInput(messages);
   if (tools?.length) body.tools = toResponsesTools(tools);

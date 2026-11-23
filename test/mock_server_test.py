@@ -82,6 +82,44 @@ class MockServerTest(unittest.TestCase):
             with caught.exception as error:
                 self.assertIn('Unterminated string starting at', error.read().decode())
 
+    def test_models_offer_efforts_like_the_launcher(self):
+        models = json.loads(self.request('/v1/models'))['data']
+        self.assertEqual([m['id'] for m in models], ['mock-1', 'mock-2'])
+        self.assertEqual(models[0]['reasoning']['default_effort'], 'medium')
+        self.assertNotIn('reasoning', models[1])
+        self.assertNotIn('context_length', models[1], 'hidden with the window')
+
+    def streamed_text(self, data):
+        text = ''
+        for line in data.splitlines():
+            if not line.startswith('data: {'):
+                continue
+            c = json.loads(line[6:])
+            text += c.get('delta', '') if c.get('type') == 'response.output_text.delta' else \
+                ''.join(ch.get('delta', {}).get('content') or '' for ch in c.get('choices', []))
+        return text
+
+    def test_echo_reports_model_and_effort(self):
+        chat = self.request('/v1/chat/completions', {'model': 'mock-2', 'messages': [{'role': 'user', 'content': 'hi'}]})
+        self.assertIn('| mock-2 | - |', self.streamed_text(chat))
+        response = self.request('/v1/responses', {'model': 'mock-1', 'reasoning': {'effort': 'low'},
+                                                  'input': [{'role': 'user', 'content': 'hi'}]})
+        self.assertIn('| mock-1 | low |', self.streamed_text(response))
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.request('/v1/chat/completions', {'model': 'mock-1', 'reasoning_effort': 'xhigh', 'messages': []})
+        self.assertEqual(caught.exception.code, 400)
+        caught.exception.close()
+
+    def test_model_cannot_change_within_a_chain(self):
+        first = self.request('/v1/responses', {'model': 'mock-1', 'input': [{'role': 'user', 'content': 'hi'}]})
+        rid = json.loads(next(line[6:] for line in first.splitlines() if '"response.completed"' in line))['response']['id']
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.request('/v1/responses', {'model': 'mock-2', 'previous_response_id': rid, 'input': []})
+        self.assertEqual(caught.exception.code, 400)
+        with caught.exception as error:
+            self.assertIn('Cannot change models', error.read().decode())
+        self.assertIn('response.completed', self.request('/v1/responses', {'model': 'mock-1', 'previous_response_id': rid, 'input': []}))
+
 
 if __name__ == '__main__':
     unittest.main()

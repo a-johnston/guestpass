@@ -21,8 +21,11 @@ History tool-call arguments must always be valid JSON (otherwise HTTP 400).
 --no-caps reports no modalities and serves no /props (a barebones server: capabilities unknown).
 /props reports vision, n_ctx, and basalt's `documents` capability, like basalt 0.3.3.
 --models-delay / --models-status slow down or fail /models (for the connecting state).
-/models reports mock-1 with meta.n_ctx 8192; with stream_options.include_usage, a rough token
-count is sent OpenAI-style (a final chunk with empty choices).
+/models reports mock-1 (meta.n_ctx 8192, reasoning efforts like llm-launcher's) and mock-2
+(context_length 32768, text only, no efforts); --one-model lists only mock-1. Like chat-bridge, a
+model can't change within a stored chain, and an effort mock-1 doesn't list is a 400. The echo
+reply shows the model and effort it got. With stream_options.include_usage, a rough token count
+is sent OpenAI-style (a final chunk with empty choices).
 
 Scripted behaviour, keyed off the last user message:
   call:{"name": "...", "args": {...}, "think": "optional reasoning"}
@@ -45,6 +48,8 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+MOCK1_EFFORTS = ["high", "medium", "low", "none"]
 
 PANE_HTML = """<!doctype html><html><head><title>Bouncer</title>
 <style>html,body{margin:0;height:100%;background:#111}canvas{display:block}</style></head>
@@ -164,6 +169,7 @@ class Handler(BaseHTTPRequestHandler):
     no_caps = False
     models_delay = 0.0
     models_status = 200
+    one_model = False
     no_responses = False
     stateless_responses = False
     forget_every = 0
@@ -174,6 +180,7 @@ class Handler(BaseHTTPRequestHandler):
     # /v1/responses state, shared by all request threads.
     lock = threading.Lock()
     responses = {}  # id -> chat history including that response's reply
+    response_models = {}  # id -> the model that produced it
     response_ids = itertools.count(1)
     call_ids = itertools.count(1)
     chained_requests = 0
@@ -209,12 +216,22 @@ class Handler(BaseHTTPRequestHandler):
         time.sleep(self.models_delay)
         if self.models_status != 200:
             return self.reject(self.models_status, "model list unavailable (--models-status)")
-        mock1 = {"id": "mock-1"}
+        mock1 = {"id": "mock-1", "name": "Mock One"}
         if not self.hide_ctx:
             mock1["meta"] = {"n_ctx": 8192}
         if not self.no_caps:
             mock1["architecture"] = {"input_modalities": ["text"] if self.no_vision else ["text", "image"]}
-        body = json.dumps({"object": "list", "data": [mock1, {"id": "mock-2"}]}).encode()
+        # llm-launcher's catalog fields (OpenRouter's reasoning object), strongest first.
+        mock1["supported_parameters"] = ["max_tokens", "reasoning_effort"]
+        mock1["reasoning"] = {"supported_efforts": MOCK1_EFFORTS, "default_effort": "medium",
+                              "default_enabled": True, "mandatory": False}
+        mock2 = {"id": "mock-2", "name": "Mock Two"}
+        if not self.hide_ctx:
+            mock2["context_length"] = 32768
+        if not self.no_caps:
+            mock2["architecture"] = {"input_modalities": ["text"]}
+        data = [mock1] if self.one_model else [mock1, mock2]
+        body = json.dumps({"object": "list", "data": data}).encode()
         self.send_response(200)
         self.cors()
         self.send_header("Content-Type", "application/json")
@@ -254,6 +271,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.missing()
         if not self.authorized():
             return
+        self.model = req.get("model") or "mock-1"
+        self.effort = (req.get("reasoning") or {}).get("effort") if responses else req.get("reasoning_effort")
+        if self.model == "mock-1" and self.effort is not None and self.effort not in MOCK1_EFFORTS:
+            return self.reject(400, f"Unsupported reasoning.effort {self.effort!r} for model 'mock-1'.",
+                               type="invalid_request_error", param="reasoning.effort")
         if not responses:
             self.dialect = "chat"
             return self.serve(items, req, req.get("stream_options") or {})
@@ -270,6 +292,9 @@ class Handler(BaseHTTPRequestHandler):
             if history is None:
                 return self.reject(404, NOT_FOUND, type="invalid_request_error", param="previous_response_id",
                                    code="previous_response_not_found")
+            if self.response_models.get(prev, self.model) != self.model:
+                return self.reject(400, "Cannot change models within a stored response chain.",
+                                   type="invalid_request_error", param="model")
         history = history + items_to_messages(items)
         system = [{"role": "system", "content": req["instructions"]}] if req.get("instructions") else []
         self.dialect = "responses"
@@ -344,7 +369,9 @@ class Handler(BaseHTTPRequestHandler):
             msg["tool_calls"] = r["calls"]
         with self.lock:
             self.responses[self.response_id] = self.history + [msg]
+            self.response_models[self.response_id] = self.model
             self.responses.pop(self.prev, None)  # evicted once something chains from it
+            self.response_models.pop(self.prev, None)
 
     def missing(self):
         """A route this server doesn't have: a plain-text 404 (with CORS, so browsers can read it)."""
@@ -456,7 +483,7 @@ class Handler(BaseHTTPRequestHandler):
                             "output_index": len(self.items) - 1, "delta": fn["arguments"]})
 
     def response_object(self, status):
-        r = {"id": self.response_id, "object": "response", "status": status, "model": "mock-1",
+        r = {"id": self.response_id, "object": "response", "status": status, "model": self.model,
              "store": not self.stateless_responses, "previous_response_id": self.prev, "output": self.items}
         if status == "completed":
             u = self.usage
@@ -534,7 +561,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.stream_text("Let me consider this carefully... ok.", field="reasoning_content")
             self.stream_text(
                 f"You said: **{user}**\n\n" + (f"{received}\n\n" if received else "") +
-                f"| tools sent | messages |\n|---|---|\n| {has_tools} | {len(msgs)} |\n\n"
+                f"| tools sent | messages | model | effort |\n|---|---|---|---|\n"
+                f"| {has_tools} | {len(msgs)} | {self.model} | {self.effort or '-'} |\n\n"
                 "Here is a runnable block:\n\n```html\n<button onclick=\"this.textContent='clicked!'\">Click me</button>\n```\n")
         self.emit(chunk({}, "stop"))
         self.end_stream()
@@ -566,6 +594,7 @@ if __name__ == "__main__":
     ap.add_argument("--no-caps", action="store_true", help="report no modalities and no /props, like a barebones server")
     ap.add_argument("--models-delay", type=float, default=0.0, help="seconds before /models answers")
     ap.add_argument("--models-status", type=int, default=200, help="make /models fail with this status")
+    ap.add_argument("--one-model", action="store_true", help="list only mock-1")
     ap.add_argument("--no-responses", action="store_true", help="no /v1/responses route (plain-text 404)")
     ap.add_argument("--stateless-responses", action="store_true", help="reject previous_response_id, answer store: false")
     ap.add_argument("--forget-every", type=int, default=0, metavar="N", help="every Nth chained request: not found")
@@ -581,6 +610,7 @@ if __name__ == "__main__":
     Handler.no_caps = a.no_caps
     Handler.models_delay = a.models_delay
     Handler.models_status = a.models_status
+    Handler.one_model = a.one_model
     Handler.no_responses = a.no_responses
     Handler.stateless_responses = a.stateless_responses
     Handler.forget_every = a.forget_every

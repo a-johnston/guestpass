@@ -33,16 +33,45 @@ export async function listModels({ baseUrl, apiKey, signal }) {
   }
   if (!res.ok) throw new Error(`GET /models failed: HTTP ${res.status} ${(await res.text()).slice(0, 300)}`);
   const json = await res.json();
-  // Keep the server's order: "the first model" means the one the server lists first.
+  // Keep the server's order: chats start on the model the server lists first.
   return (json.data || json.models || [])
     .map((m) => ({
       id: m.id || m.name,
+      name: typeof m.name === 'string' && m.name.trim() ? m.name.trim() : null,
       contextLength: contextLengthOf(m),
       // OpenRouter-style, also reported by basalt: ["text", "image", …]
       inputModalities: Array.isArray(m.architecture?.input_modalities) ? m.architecture.input_modalities : null,
+      effort: effortsOf(m),
     }))
     .filter((m) => m.id);
 }
+
+/** Effort names weakest first; names outside it keep the server's order after them. */
+const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORT_LABELS = { none: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' };
+
+/**
+ * The reasoning efforts a /models entry offers (OpenRouter's `reasoning` object, as llm-launcher
+ * reports it), or null unless there are at least two to choose from. levels: weakest first.
+ * initial: the server's default (default_enabled: false means "none"), else medium, else the
+ * weakest level that thinks.
+ */
+export function effortsOf(m) {
+  const listed = m?.reasoning?.supported_efforts;
+  if (!Array.isArray(listed)) return null;
+  const rank = (e) => { const i = EFFORT_ORDER.indexOf(e); return i === -1 ? EFFORT_ORDER.length : i; };
+  const levels = [...new Set(listed.filter((e) => typeof e === 'string' && e))]
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => rank(a.e) - rank(b.e) || a.i - b.i)
+    .map(({ e }) => e);
+  if (levels.length < 2) return null;
+  const { default_effort: named, default_enabled: enabled } = m.reasoning;
+  const initial = [named, enabled === false && 'none', 'medium'].find((e) => e && levels.includes(e))
+    ?? levels.find((e) => e !== 'none');
+  return { levels, initial };
+}
+
+export const effortLabel = (e) => EFFORT_LABELS[e] ?? e;
 
 /** Context window as reported by various servers' /models entries, if any. */
 export function contextLengthOf(m) {
@@ -138,7 +167,7 @@ export function chainRecovery(err, { dialect, chained }) {
 }
 
 /**
- * The connection indicator's text: the model and the API carrying the conversation. Stateful
+ * The connection indicator's text: the model (if given) and the API carrying the conversation. Stateful
  * means the server keeps responses, so only new messages are sent; `chain` is null until the
  * first reply says.
  */

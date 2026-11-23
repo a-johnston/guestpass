@@ -78,7 +78,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .brand { font-size: 15px; }
 .spacer { flex: 1; }
-.status { display: inline-flex; align-items: center; padding: 4px; }
+.status {
+  display: inline-flex; align-items: center; justify-content: center; padding: 6px;
+  background: transparent; border: none; border-radius: 6px;
+}
+.status:hover, .status[aria-expanded="true"] { background: var(--surface-2); }
 .ctx {
   font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap;
   background: transparent; border: none; padding: 4px 6px; border-radius: 6px;
@@ -306,6 +310,15 @@ body.resizing iframe { pointer-events: none; }
 .popover label { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; font-size: 13px; cursor: pointer; }
 .popover label input { margin: 2px 0 0; }
 .popover label small { grid-column: 2; color: var(--muted); font-size: 12px; }
+.conn-text { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+#conn-retry { margin-top: 8px; }
+/* Model and thinking: label | menu rows. Each pair is one element, so either can be hidden whole. */
+.conn-options { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 12px; align-items: center; }
+.conn-field { display: contents; }
+.popover .conn-options label { display: block; font-size: 13px; padding: 0; cursor: default; }
+.conn-options select { width: 100%; min-width: 0; font-size: 13px; padding: 4px 8px; }
+.conn-options select:disabled { color: var(--muted); cursor: default; }
+.conn-note { grid-column: 1 / -1; margin: 0; }
 
 @media (max-width: 800px) {
   #topbar { padding: 8px 12px; }
@@ -318,6 +331,8 @@ body.resizing iframe { pointer-events: none; }
 @media (pointer: coarse) {
   #topbar .icon-btn, .repo-link { min-width: 34px; min-height: 34px; justify-content: center; }
   .ctx { min-height: 34px; }
+  .status { min-width: 34px; min-height: 34px; }
+  .conn-options select { font-size: 16px; } /* iOS zooms into smaller inputs on focus */
   .topbar-actions { gap: 4px; }
   .popover label { font-size: 14px; padding: 6px 0; align-items: center; }
   .popover label input { margin: 0; width: 16px; height: 16px; }

@@ -10,7 +10,7 @@ import { assertWireHistory } from './helpers/history.js';
 import { runRecall } from '../js/recall.js';
 import { buildResponsesBody } from '../js/responses.js';
 import { fallbackFor } from '../js/fallbacks.js';
-import { chainRecovery, connectionLabel } from '../js/api.js';
+import { chainRecovery, connectionLabel, capabilitiesFrom, effortLabel } from '../js/api.js';
 globalThis.window ??= { addEventListener() {} };
 const tools = await import('../js/tools.js');
 const source = readFileSync(new URL('../js/main.js', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '').replace(/\ninit\(\);\s*$/, '');
@@ -20,7 +20,7 @@ function app(responses = [], onTool = null) {
   const requests = [], notices = [], executed = [];
   let compactionRuns = 0;
   const context = vm.createContext({
-    ...content, ...compaction, ...items, ...tools, runRecall, buildResponsesBody, fallbackFor, chainRecovery, connectionLabel,
+    ...content, ...compaction, ...items, ...tools, runRecall, buildResponsesBody, fallbackFor, chainRecovery, connectionLabel, capabilitiesFrom, effortLabel,
     compactHistory: (...args) => { compactionRuns++; return compaction.compactHistory(...args); },
     document: { getElementById: node }, createPaneManager: () => ({}), structuredClone, AbortController, performance,
     streamChat: async (req) => { requests.push(structuredClone(req.body)); const next = responses.shift(); if (next instanceof Error) throw next; return typeof next === 'function' ? await next() : next || reply(); },
@@ -31,7 +31,7 @@ function app(responses = [], onTool = null) {
     setBusy = () => {}; followScroll = () => {}; addUserMessage = () => {};
     notice = (text) => { notices.push(text); return { append() {} }; };
     createAssistantView = () => ({ update() {}, remove() {}, finish() {}, thinkingMs() { return 0; }, addToolCall() { return { done() {} }; }, fail(e) { throw e; } });
-    globalThis.app = { state, sendableHistory, adoptCompaction, buildRequest, runTurn, clearMedia, updateClearMedia, pushUser, el };
+    globalThis.app = { state, sendableHistory, adoptCompaction, buildRequest, runTurn, clearMedia, updateClearMedia, pushUser, selectModel, el };
   `, context);
   return { ...context.app, requests, notices, executed, get compactionRuns() { return compactionRuns; } };
 }
@@ -297,4 +297,56 @@ test('manual button compacts text-only histories and recall sees full originals'
   await a.runTurn();
   const result = a.state.messages.find((m) => m.role === 'tool');
   assert.match(result.content, /x{100}/);
+});
+
+const MODELS = [
+  { id: 'a', name: 'Model A', contextLength: 8000, inputModalities: ['text', 'image'], effort: { levels: ['none', 'low', 'medium', 'xhigh'], initial: 'medium' } },
+  { id: 'b', name: null, contextLength: 32000, inputModalities: ['text'], effort: { levels: ['none', 'low', 'high'], initial: 'none' } },
+  { id: 'c', name: null, contextLength: null, inputModalities: null, effort: null },
+];
+function withModels(a) {
+  a.state.models = structuredClone(MODELS);
+  a.state.cfg.model = 'a';
+  a.state.effort = 'medium';
+  return a;
+}
+test('the chosen model and effort go out with every request, in either dialect', () => {
+  const a = withModels(app()); a.state.messages = [{ role: 'user', content: 'hi' }];
+  let body = a.buildRequest().body;
+  assert.deepEqual([body.model, body.reasoning], ['a', { effort: 'medium' }]);
+  a.state.api.dialect = 'chat';
+  body = a.buildRequest().body;
+  assert.deepEqual([body.model, body.reasoning_effort], ['a', 'medium']);
+  a.selectModel('c');
+  body = a.buildRequest().body;
+  assert.deepEqual([body.model, 'reasoning_effort' in body], ['c', false]);
+});
+test('switching models drops the chain and takes on the new model\'s window and vision', () => {
+  const a = withModels(app()); a.state.messages = [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'yo' }, { role: 'user', content: 'more' }];
+  a.state.chainHead = { id: 'resp_1', sent: 2, held: 10 };
+  a.selectModel('b');
+  assert.equal(a.state.chainHead, null);
+  assert.equal(a.buildRequest().body.previous_response_id, undefined);
+  assert.equal(a.buildRequest().body.input.length, 3);
+  assert.deepEqual([a.state.context.max, a.state.caps.vision], [32000, false]);
+  a.selectModel('c');
+  assert.deepEqual([a.state.context.max, a.state.context.reported, a.state.caps.vision], [null, false, null]);
+});
+test('a switch starts on the new model\'s default effort unless the user picked one it has', () => {
+  const a = withModels(app());
+  a.selectModel('b');
+  assert.equal(a.state.effort, 'none', 'untouched: the new default');
+  a.state.effort = a.state.effortPick = 'low';
+  a.selectModel('a');
+  assert.equal(a.state.effort, 'low', 'picked and offered: kept');
+  a.state.effort = a.state.effortPick = 'xhigh';
+  a.selectModel('b');
+  assert.equal(a.state.effort, 'none', 'picked but not offered: the default');
+  a.selectModel('a');
+  assert.equal(a.state.effort, 'xhigh', 'back on a model that offers it: the pick again');
+});
+test('the model stays put while a reply runs', () => {
+  const a = withModels(app()); a.state.busy = true;
+  a.selectModel('b');
+  assert.equal(a.state.cfg.model, 'a');
 });
