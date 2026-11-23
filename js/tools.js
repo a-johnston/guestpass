@@ -101,6 +101,7 @@ let autoId = 0;
  *   ui.inline — {has(id), remove(id), expand(id)} for inline widgets
  *   ui.panes — the pane manager (open/close/has/ids)
  *   ui.canRerender(id) / ui.rerender(id, html) — reload a widget or pane in place with new source (edit)
+ *   ui.mirrorOf(id) — the pane the user opened from widget `id`, if any: patches reach it too
  *   ui.imageMime() — the format screenshots are encoded in
  * Returns the string sent back to the model as the tool result, or {text, images} when the
  * result includes images (each {dataUrl, meta}, see content.js).
@@ -150,6 +151,9 @@ export async function runTool(name, rawArgs, ui) {
       const id = sanitizeId(args.id);
       const before = getFrame(id)?.logs.length ?? 0;
       const { ok, value } = await patchFrame(id, args.data ?? null);
+      // The user's pane copy of a widget gets the same patch; its result isn't the model's concern.
+      const mirror = ok && ui.mirrorOf?.(id);
+      if (mirror) patchFrame(mirror, args.data ?? null);
       await new Promise((r) => setTimeout(r, 150)); // let console output from the handler arrive
       const shown = typeof value === 'string' ? value : JSON.stringify(value);
       return ok
@@ -216,7 +220,7 @@ export async function runTool(name, rawArgs, ui) {
       if (args.id == null || args.id === '') {
         const pages = ui.listPages();
         return pages.length
-          ? pages.map((p) => `${p.id} (${p.kind}${p.title && p.title !== p.id ? `, "${p.title}"` : ''}, ${p.lines} lines)`).join('\n')
+          ? pages.map((p) => `${p.id} (${p.kind}${p.mirrorOf ? `, the user's copy of ${p.mirrorOf}` : ''}${p.title && p.title !== p.id ? `, "${p.title}"` : ''}, ${p.lines} lines)`).join('\n')
           : '(no open pages)';
       }
       const id = sanitizeId(args.id);

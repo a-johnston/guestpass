@@ -21,7 +21,8 @@ export function createPaneManager({ aside, tabs, body, onChange }) {
     onChange?.();
   }
 
-  function open(id, title, html) {
+  /** Creates the pane or reloads it with new source, without bringing it forward. */
+  function render(id, title, html) {
     let p = panes.get(id);
     if (!p) {
       const tab = document.createElement('div');
@@ -46,6 +47,10 @@ export function createPaneManager({ aside, tabs, body, onChange }) {
     p.tab.querySelector('.pane-tab-label').textContent = title;
     p.tab.title = title;
     p.view.replaceChildren(createFrame(id, html, { title }));
+  }
+
+  function open(id, title, html) {
+    render(id, title, html);
     activate(id);
     setVisible(true);
   }
@@ -71,6 +76,10 @@ export function createPaneManager({ aside, tabs, body, onChange }) {
 
   return {
     open,
+    /** Reloads an open pane with new source in place: its tab and the panel stay as they are. */
+    update(id, title, html) {
+      if (panes.has(id)) render(id, title, html);
+    },
     close: closePane,
     clear,
     has: (id) => panes.has(id),

@@ -66,6 +66,8 @@ const state = {
   queue: [],
   /** Inline widgets by id, so re-rendering an id replaces the old one. @type {Map<string, {card:HTMLElement, chip:{note:Function}|null}>} */
   inline: new Map(),
+  /** Panes the user opened from a widget (⧉), by widget id: they follow its new source. @type {Map<string, string>} */
+  mirrors: new Map(),
 };
 
 const el = {
@@ -862,6 +864,7 @@ async function runTurn() {
             },
             canRerender: (id) => state.inline.has(id) || panes.has(id),
             rerender: rerenderPage,
+            mirrorOf,
             listPages,
             panes,
             imageMime,
@@ -920,15 +923,31 @@ function mountInlineWidget(view, chip, widget) {
   const card = widgetCard(widget);
   view.extras.append(card);
   state.inline.set(widget.id, { card, chip, widget });
+  updateMirror(widget.id, widget);
   followScroll();
+}
+
+/** The open pane mirroring widget `id`, if any. */
+function mirrorOf(id) {
+  const pane = state.mirrors.get(id);
+  if (pane && panes.has(pane)) return pane;
+  state.mirrors.delete(id);
+  return null;
+}
+
+/** Reloads the widget's mirror pane with its new source, in place (it doesn't take focus). */
+function updateMirror(id, { title, html }) {
+  const pane = mirrorOf(id);
+  if (pane) panes.update(pane, title || id, html);
 }
 
 /** Open pages for read() without an id: widgets, then panes, with their current size. */
 function listPages() {
   const lines = (id) => (getFrame(id)?.html || '').split('\n').length;
+  const mirrored = new Map([...state.mirrors.keys()].map((w) => [mirrorOf(w), w]));
   return [
     ...[...state.inline].map(([id, e]) => ({ id, kind: 'inline', title: e.widget?.title || '', lines: lines(id) })),
-    ...panes.ids().map((id) => ({ id, kind: 'pane', title: panes.titleOf(id) || '', lines: lines(id) })),
+    ...panes.ids().map((id) => ({ id, kind: 'pane', title: panes.titleOf(id) || '', lines: lines(id), mirrorOf: mirrored.get(id) ?? null })),
   ];
 }
 
@@ -940,6 +959,7 @@ function rerenderPage(id, html) {
     const card = widgetCard({ ...entry.widget, collapsed: entry.card.classList.contains('collapsed') });
     entry.card.replaceWith(card);
     entry.card = card;
+    updateMirror(id, entry.widget);
   } else if (panes.has(id)) {
     panes.open(id, panes.titleOf(id), html);
   }
@@ -1228,7 +1248,12 @@ function widgetCard({ id, title, html, collapsed = false }) {
   const pop = h('button', 'icon-btn', '⧉');
   pop.type = 'button';
   pop.title = 'Open in side pane';
-  pop.addEventListener('click', (e) => { e.stopPropagation(); panes.open(`${id}-pane`, title || id, html); });
+  pop.addEventListener('click', (e) => {
+    e.stopPropagation();
+    panes.open(`${id}-pane`, title || id, html);
+    // A model's widget: the pane follows its later renders, edits and patches (Run previews don't change).
+    if (state.inline.get(id)?.card === fig) state.mirrors.set(id, `${id}-pane`);
+  });
   cap.append(label, pop);
   cap.addEventListener('click', () => setWidgetCollapsed(fig, !fig.classList.contains('collapsed')));
   const frame = createFrame(id, html, {
