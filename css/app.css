@@ -13,7 +13,6 @@
   --warn: #c98a00;
   --danger: #d23c3c;
   --code-bg: #f3f3f6;
-  /* syntax highlighting (GitHub-like) */
   --hl-keyword: #cf222e;
   --hl-string: #0a3069;
   --hl-number: #0550ae;
@@ -70,9 +69,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 #app { display: flex; height: 100dvh; }
 #chat-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
 
-/* ---------- top bar */
 #topbar {
-  position: relative; /* the context popover hangs from the bar, not the counter: see .popover */
+  position: relative;
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
 }
@@ -91,7 +89,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .ctx:hover, .ctx[aria-expanded="true"] { background: var(--surface-2); }
 .ctx[data-level="mid"] { color: var(--warn); }
 .ctx[data-level="high"] { color: var(--danger); }
-/* Compacting would help: the cue the top-bar Compact button used to give by appearing. */
 .ctx[data-compact="yes"]::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
 .ctx-stats { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
 .ctx-stats dt { color: var(--muted); }
@@ -123,7 +120,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .icon-btn { background: transparent; border: none; padding: 2px 6px; color: var(--muted); font-size: 15px; line-height: 1; }
 .icon-btn:hover { color: var(--text); background: var(--surface-2); }
 
-/* ---------- messages */
 #messages {
   flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
   padding: 20px max(16px, calc((100% - 860px) / 2)) 8px;
@@ -148,7 +144,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .msg.assistant[data-calling]:not([data-calling=""])::after { content: attr(data-calling); display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
 .msg.assistant.error .md { color: var(--danger); white-space: pre-wrap; }
 .retry-row { margin-top: 8px; }
-/* Response footer: always visible, deliberately quiet. */
 .msg-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; margin-top: 6px; margin-left: -6px; }
 .msg-btn {
   background: transparent; border: none; padding: 2px 6px; border-radius: 6px;
@@ -161,7 +156,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .md > :last-child { margin-bottom: 0; }
 .md pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow-x: auto; font-size: 13px; }
 
-/* highlight.js token colours; values come from the --hl-* tokens so light/dark follow the app */
 .hljs-keyword, .hljs-doctag, .hljs-template-tag, .hljs-type, .hljs-variable.language_, .hljs-selector-tag { color: var(--hl-keyword); }
 .hljs-string, .hljs-regexp, .hljs-meta .hljs-string, .hljs-char.escape_ { color: var(--hl-string); }
 .hljs-number, .hljs-literal, .hljs-built_in, .hljs-symbol, .hljs-variable, .hljs-template-variable, .hljs-operator { color: var(--hl-number); }
@@ -181,7 +175,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .md img { max-width: 100%; }
 .md a { color: var(--accent); }
 .md blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid var(--border); color: var(--muted); }
-/* Finished code blocks: a header (language + buttons) joined to the <pre> as one card. */
 .code-block { margin: 1em 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--code-bg); }
 .code-block pre { margin: 0; border: none; border-radius: 0; }
 .code-head { display: flex; align-items: center; gap: 2px; padding: 2px 4px 2px 12px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
@@ -212,9 +205,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .tool-call.has-errors .tool-status { color: var(--warn); }
 .tool-call pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--border); max-height: 240px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
 .tool-call.superseded .tool-target { text-decoration: line-through; }
-/* Keep the scrollbar visible on these boxes. Chromium/Safari honour custom scrollbars;
-   Firefox only gets a colour hint and may still overlay-hide it (macOS "show scroll bars:
-   automatically"). */
 .tool-call pre::-webkit-scrollbar { width: 10px; height: 10px; }
 .tool-call pre::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 5px; border: 2px solid var(--surface); }
 .tool-call pre::-webkit-scrollbar-track { background: var(--surface-2); }
@@ -227,14 +217,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .widget figcaption { cursor: pointer; user-select: none; }
 .widget-title { flex: 1; min-width: 0; text-align: left; background: transparent; border: 0; padding: 0; color: inherit; font: inherit; cursor: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .widget.collapsed figcaption { border-bottom-color: transparent; }
-/* Collapsing hides the wrapper, not the frame, so the page keeps its size while out of sight. */
 .widget.collapsed .widget-body { height: 0; overflow: hidden; }
 .widget iframe { display: block; width: 100%; border: 0; background: #fff; transition: height .15s; }
 
-/* ---------- composer */
 #composer { display: flex; gap: 8px; padding: 10px 16px 14px; width: 100%; max-width: 892px; margin: 0 auto; align-items: flex-end; }
 .prompt-wrap { flex: 1; min-width: 0; position: relative; display: flex; }
-/* Right padding always reserves room for the stop button, so text never reflows when it appears. */
 #prompt { flex: 1; resize: none; padding: 10px 46px 10px 12px; border-radius: 12px; min-height: 44px; max-height: 240px; overflow-y: hidden; }
 #send-btn { height: 44px; min-width: 72px; border-radius: 12px; }
 .stop-btn {
@@ -253,7 +240,6 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .queued-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queued-count { color: var(--muted); font-size: 12px; flex: none; }
 
-/* ---------- attachments: the tray above the composer, and the row inside a sent message */
 .attach-btn { height: 44px; width: 44px; padding: 0; border-radius: 12px; font-size: 22px; line-height: 1; color: var(--muted); flex: none; }
 .attach-btn:hover { color: var(--text); }
 body.dropping #prompt { border-color: var(--accent); }
@@ -274,7 +260,6 @@ body.dropping #prompt { border-color: var(--accent); }
 .msg-media img { max-width: 160px; max-height: 120px; border-radius: 6px; display: block; }
 .msg-media .chip { background: rgb(255 255 255 / .15); border-color: rgb(255 255 255 / .3); color: inherit; }
 
-/* ---------- panes */
 #resizer { flex: none; width: 6px; cursor: col-resize; background: var(--border); }
 #resizer:hover, body.resizing #resizer { background: var(--accent); }
 body.resizing { cursor: col-resize; user-select: none; }
@@ -298,8 +283,6 @@ body.resizing iframe { pointer-events: none; }
 #setup-form a { color: var(--accent); }
 
 .topbar-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
-/* Anchored to the top bar's bottom-left corner, under the context counter, rather than to the
-   counter itself: when the bar wraps on a phone it can land anywhere and a pinned popover ran off-screen. */
 .popover {
   position: absolute; top: calc(100% + 6px); left: 8px; z-index: 20; width: min(320px, calc(100% - 16px));
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px;
@@ -312,7 +295,6 @@ body.resizing iframe { pointer-events: none; }
 .popover label small { grid-column: 2; color: var(--muted); font-size: 12px; }
 .conn-text { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 #conn-retry { margin-top: 8px; }
-/* Model and thinking: label | menu rows. Each pair is one element, so either can be hidden whole. */
 .conn-options { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 12px; align-items: center; }
 .conn-field { display: contents; }
 .popover .conn-options label { display: block; font-size: 13px; padding: 0; cursor: default; }
@@ -327,7 +309,6 @@ body.resizing iframe { pointer-events: none; }
   #panes { position: fixed; inset: 0; width: auto; min-width: 0; z-index: 10; }
 }
 
-/* Touch: finger-sized targets for the top bar icons and the options rows. */
 @media (pointer: coarse) {
   #topbar .icon-btn, .repo-link { min-width: 34px; min-height: 34px; justify-content: center; }
   .ctx { min-height: 34px; }
@@ -339,7 +320,6 @@ body.resizing iframe { pointer-events: none; }
   .popover fieldset { gap: 0; }
 }
 
-/* ---------- setup (link builder) */
 #setup { position: relative; height: 100dvh; overflow-y: auto; padding: max(50px, 8vh) 16px 24px; }
 #setup-form {
   max-width: 560px; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; gap: 12px;
@@ -354,7 +334,7 @@ body.resizing iframe { pointer-events: none; }
 .hint:empty { display: none; }
 .hint[data-kind="ok"] { color: var(--ok); }
 .hint[data-kind="error"] { color: var(--danger); }
-.share { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.share { min-width: 0; margin: 0; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
 .share legend { font-size: 13px; font-weight: 600; padding: 0 4px; }
 .row { display: flex; gap: 8px; }
 .row input { flex: 1; min-width: 0; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
